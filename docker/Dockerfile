@@ -169,7 +169,7 @@ RUN bisheng $BISHENG_OPTS ./tmatmulk.cpp -o ./matmul_kernel.so
 # for available versions see https://pypi.org/project/torch-npu/#history
 RUN pip install --no-cache-dir torch==2.9.0 --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir torch-npu==2.9.0 \
-    && pip install numpy pyyaml
+    && pip install --no-cache-dir numpy pyyaml
 
 WORKDIR /sources/test/
 
