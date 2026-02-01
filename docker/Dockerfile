@@ -172,6 +172,12 @@ RUN bisheng \
     ./tmatmulk.cpp \
     -o ./matmul_kernel.so
 
+# add torch_npu to faciliate on-device testing during `docker run` (not used at build stage)
+# for available versions see https://pypi.org/project/torch-npu/#history
+RUN pip install --no-cache-dir torch==2.9.0 --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir torch-npu==2.9.0 \
+    && pip install numpy pyyaml
+
 WORKDIR /sources/test/
 
 CMD ["/bin/bash"]
