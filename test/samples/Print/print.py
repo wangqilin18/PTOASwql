@@ -13,7 +13,7 @@ def build():
             ptr_f32 = pto.PtrType.get(f32, ctx)
 
             tv2_f32 = pto.TensorViewType.get(2, f32, ctx)
-            tile_view_32 = pto.TileViewType.get([32, 32], f32, ctx)
+            tile_view_32 = pto.PartitionTensorViewType.get([32, 32], f32, ctx)
             ub = pto.AddressSpaceAttr.get(pto.AddressSpace.UB, ctx)
             bl = pto.BLayoutAttr.get(pto.BLayout.RowMajor, ctx)
             sl = pto.SLayoutAttr.get(pto.SLayout.NoneBox, ctx)
@@ -38,8 +38,8 @@ def build():
                 # Create tensor view
                 tv0 = pto.MakeTensorViewOp(tv2_f32, arg0, [c32, c32], [c32, c1]).result
 
-                # Create tile_view using subview
-                sv0 = pto.SubviewOp(tile_view_32, tv0, [c0, c0], [c32, c32]).result
+                # Create partition_view from tensor_view
+                sv0 = pto.PartitionViewOp(tile_view_32, tv0, offsets=[c0, c0], sizes=[c32, c32]).result
 
                 # Allocate tile buffer
                 tb0 = pto.AllocTileOp(tile_buf_32).result
@@ -50,7 +50,7 @@ def build():
                 # Test TPrintOp with TileBufType
                 pto.TPrintOp(tb0)
 
-                # Test TPrintOp with TileViewType
+                # Test TPrintOp with PartitionTensorViewType
                 pto.TPrintOp(sv0)
 
                 # Return from function

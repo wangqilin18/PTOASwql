@@ -14,7 +14,7 @@ def build():
             ptr_i32 = pto.PtrType.get(i32, ctx)
 
             tv2_i32 = pto.TensorViewType.get(2, i32, ctx)
-            tile_view_32 = pto.TileViewType.get([32, 32], i32, ctx)
+            tile_view_32 = pto.PartitionTensorViewType.get([32, 32], i32, ctx)
             ub = pto.AddressSpaceAttr.get(pto.AddressSpace.UB, ctx)
             bl = pto.BLayoutAttr.get(pto.BLayout.RowMajor, ctx)
             sl = pto.SLayoutAttr.get(pto.SLayout.NoneBox, ctx)
@@ -41,8 +41,8 @@ def build():
                 tv1 = pto.MakeTensorViewOp(tv2_i32, arg1, [c32, c32], [c32, c1]).result
                 tv2 = pto.MakeTensorViewOp(tv2_i32, arg2, [c32, c32], [c32, c1]).result
 
-                sv0 = pto.SubviewOp(tile_view_32, tv0, [c0, c0], [c32, c32]).result
-                sv1 = pto.SubviewOp(tile_view_32, tv1, [c0, c0], [c32, c32]).result
+                sv0 = pto.PartitionViewOp(tile_view_32, tv0, offsets=[c0, c0], sizes=[c32, c32]).result
+                sv1 = pto.PartitionViewOp(tile_view_32, tv1, offsets=[c0, c0], sizes=[c32, c32]).result
 
                 tb1 = pto.AllocTileOp(tile_buf_i32).result
                 tb2 = pto.AllocTileOp(tile_buf_i32).result
@@ -53,7 +53,7 @@ def build():
                 pto.TMScatterOp(sv0, tb1, tb2)
 
                 # %8 = subview on output tensor_view
-                sv2 = pto.SubviewOp(tile_view_32, tv2, [c0, c0], [c32, c32]).result
+                sv2 = pto.PartitionViewOp(tile_view_32, tv2, offsets=[c0, c0], sizes=[c32, c32]).result
 
                 # pto.store_dps_tb ins(%tb2) outs(%sv2)
                 pto.TStoreOp(None, tb2, sv2)

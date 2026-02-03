@@ -4911,13 +4911,13 @@ mlir::LogicalResult mlir::pto::TSYNCOp::verify() {
 mlir::LogicalResult mlir::pto::TPrintOp::verify() {
   auto srcType = getSrc().getType();
   
-  // Support TileBufType and TileViewType
+  // Support TileBufType and PartitionTensorViewType (replaces legacy TileView).
   if (mlir::dyn_cast<mlir::pto::TileBufType>(srcType) ||
-      mlir::dyn_cast<mlir::pto::TileViewType>(srcType)) {
+      mlir::dyn_cast<mlir::pto::PartitionTensorViewType>(srcType)) {
     return mlir::success();
   }
   
-  return emitOpError() << "expects tile_buf or tile_view types for src";
+  return emitOpError() << "expects tile_buf or partition_tensor_view types for src";
 }
 
 //===----------------------------------------------------------------------===//
@@ -5862,7 +5862,14 @@ void AddFDpsOp::getEffects(
   addEffect(effects, &getRhsMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
 }
- 
+
+// AbsDpsOp: Read src -> Write dst
+void AbsOp_DPS::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
+}
+
 // 6. MovDpsOp
 void MovDpsOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
@@ -5875,6 +5882,14 @@ void MovDpsOp::getEffects(
 // 针对 OpOperand* 的重载
 void TLoadOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   // [Fix] 单个操作数，直接取地址
+  addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
+}
+
+// === TAbsOp ===
+// Read: src, Write: dst
+void TAbsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
 }
