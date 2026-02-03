@@ -1931,6 +1931,8 @@ struct PTOCmpToEmitC : public OpConversionPattern<pto::CmpOp_DPS> {
     Value modeVal = rewriter.create<emitc::ConstantOp>(
         loc, modeTy, emitc::OpaqueAttr::get(ctx, tok));
 
+    auto argsAttr = rewriter.getArrayAttr({});
+
     rewriter.create<emitc::CallOpaqueOp>(
         loc,
         TypeRange{},

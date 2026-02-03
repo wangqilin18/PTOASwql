@@ -15,8 +15,8 @@ def build(M=32, N=32, K=32, TM=32, TN=32, TK=32):
 
             # tensor view shape
             tv2_f32 = pto.TensorViewType.get(2, f32, ctx)
-            tile_view_a = pto.TileViewType.get([TM, TK], f32, ctx)
-            tile_view_b = pto.TileViewType.get([TK, TN], f32, ctx)
+            tile_view_a = pto.PartitionTensorViewType.get([TM, TK], f32, ctx)
+            tile_view_b = pto.PartitionTensorViewType.get([TK, TN], f32, ctx)
 
             ub = pto.AddressSpaceAttr.get(pto.AddressSpace.UB, ctx)
             mat = pto.AddressSpaceAttr.get(pto.AddressSpace.MAT, ctx)
@@ -87,10 +87,10 @@ def build(M=32, N=32, K=32, TM=32, TN=32, TK=32):
                     tv2_f32, arg2, [ctm, ctn], [cn, c1]).result
 
                 # Updated subview with constants instead of literals
-                sv0 = pto.SubviewOp(tile_view_a, tv0, [
-                                    c0, offset_0], [ctm, ctk]).result
-                sv1 = pto.SubviewOp(tile_view_b, tv1, [
-                                    c0, offset_1], [ctk, ctn]).result
+                sv0 = pto.PartitionViewOp(tile_view_a, tv0, offsets=[
+                                    c0, offset_0], sizes=[ctm, ctk]).result
+                sv1 = pto.PartitionViewOp(tile_view_b, tv1, offsets=[
+                                    c0, offset_1], sizes=[ctk, ctn]).result
 
                 # allocate cbuf
                 aMatTile = pto.AllocTileOp(mat_tile_a).result

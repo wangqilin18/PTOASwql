@@ -35,7 +35,7 @@ def TensorOrMemref :
   AnyTypeOf<[AnyMemRef, AnyRankedTensor], "Tensor or Memref">;
 
 def PTODpsType :
-  AnyTypeOf<[AnyRankedTensor, AnyMemRef, TileViewType, TileBufType]>;
+  AnyTypeOf<[AnyRankedTensor, AnyMemRef, PartitionTensorViewType, TileBufType]>;
 
 //===----------------------------------------------------------------------===//
 // Op Class
@@ -74,16 +74,27 @@ def MakeTensorViewOp : PTO_Op<"make_tensor_view", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+// =============================================================================
+// PartitionViewOp
+// =============================================================================
+def PartitionViewOp : PTO_Op<"partition_view", [AttrSizedOperandSegments]> {
+  let summary = "Partition a tensor view into a smaller logical view (logical slicing).";
+  let description = [{
+    Captures a specific calculation region from a large view.
+    It carries offsets (where to read) and sizes (how much to read).
+    
+    IR Example:
+      %1 = pto.partition_view %0, offsets=[...], sizes=[...] 
+           : !pto.tensor_view -> !pto.partition_tensor_view
+  }];
 
-def SubviewOp : PTO_Op<"subview", [AttrSizedOperandSegments]> {
-  let summary = "Subview on tensor_view to tile_view (view-only, no copy).";
   let arguments = (ins
-    AnyType:$source,
-    Variadic<Index>:$offsets,
-    Variadic<Index>:$sizes
+    TensorViewType:$source,    // 输入: 物理大底座 (MakeTensorViewOp 的结果)
+    Variadic<Index>:$offsets,  // 动态 offsets
+    Variadic<Index>:$sizes     // 动态 sizes
   );
 
-  let results = (outs AnyType:$result);
+  let results = (outs PartitionTensorViewType:$result); // 输出: 逻辑切片
 
   let assemblyFormat = [{
     $source `,` `offsets` `=` `[` $offsets `]` `,` `sizes` `=` `[` $sizes `]`
@@ -193,14 +204,16 @@ def TLoadOp  : PTO_TOp<"tload", [
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
-  let summary = "PTO data load operation (destination-style, DPS) in tile world.";
+  let summary = "PTO data load operation (Dimension Collapse: PartitionView -> TileBuf).";
   let description = [{
+    Loads data from a high-dimensional logical partition view into a 2D physical tile buffer.
+    Constraint: The product of partition view sizes must match the product of tile buffer valid dims.
     DPS form:
-      TileBuf:  pto.tload ins(%src) outs(%dst)
+      pto.tload ins(%partition_view) outs(%tile_buf)
   }];
 
   let arguments = (ins 
-    TileViewType:$src,
+    PartitionTensorViewType:$src,
     TileBufType:$dst,
     OptionalAttr<PTO_PadModeAttr>:$pad_mode,
     Optional<AnyType>:$pad_value,
@@ -297,15 +310,17 @@ def TStoreOp: PTO_TOp<"tstore", [
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
-  let summary = "PTO data store operation (destination-style, DPS).";
+  let summary = "PTO data store operation (TileBuf -> PartitionView).";
   let description = [{
+    Stores data from a 2D physical tile buffer back to a high-dimensional logical partition view.
+    
     DPS form:
-      tile buf:  pto.tstore ins(%src) outs(%dst)
+      pto.tstore ins(%tile_buf) outs(%partition_view)
   }];
 
   let arguments = (ins
     TileBufType:$src,
-    TileViewType:$dst
+    PartitionTensorViewType:$dst
   );
 
   let results = (outs
