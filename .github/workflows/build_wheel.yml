@@ -162,33 +162,38 @@ jobs:
           path: ptoas-dist/
 
   upload_release_assets:
-    name: Upload release assets (${{ matrix.arch }})
+    name: Upload release assets
     if: github.event_name == 'release'
     needs: build_wheel
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: ["x86_64", "aarch64"]
 
     steps:
-      - name: Download wheel artifacts
+      - name: Download all wheel artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ptoas-wheel-*-${{ matrix.arch }}
+          pattern: ptoas-wheel-*
           path: release-artifacts
           merge-multiple: true
 
-      - name: Download binary artifact
+      - name: Download x86_64 binary artifact
         uses: actions/download-artifact@v4
         with:
-          name: ptoas-bin-${{ matrix.arch }}
-          path: release-artifacts/ptoas-bin-${{ matrix.arch }}
+          name: ptoas-bin-x86_64
+          path: release-artifacts/ptoas-bin-x86_64
 
-      - name: Package ptoas binary
+      - name: Download aarch64 binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ptoas-bin-aarch64
+          path: release-artifacts/ptoas-bin-aarch64
+
+      - name: Package ptoas binaries
         run: |
           set -euo pipefail
-          tar -czf "release-artifacts/ptoas-bin-${{ matrix.arch }}.tar.gz" \
-            -C "release-artifacts/ptoas-bin-${{ matrix.arch }}" .
+          tar -czf "release-artifacts/ptoas-bin-x86_64.tar.gz" \
+            -C "release-artifacts/ptoas-bin-x86_64" .
+          tar -czf "release-artifacts/ptoas-bin-aarch64.tar.gz" \
+            -C "release-artifacts/ptoas-bin-aarch64" .
 
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2

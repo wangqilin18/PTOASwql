@@ -30,10 +30,14 @@ cp "${PTO_INSTALL_DIR}/mlir/dialects/"*.py "${PY_PACKAGE_DIR}/mlir/dialects/"
 echo "Copying setup.py..."
 cp "${PTO_SOURCE_DIR}/docker/setup.py" "${PY_PACKAGE_DIR}/"
 
-# Build the wheel
+# Determine Python version tag (e.g., cp311, cp312)
+PY_VERSION=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+echo "Python version tag: ${PY_VERSION}"
+
+# Build the wheel with version-specific tag
 echo "Building wheel..."
 cd "${PY_PACKAGE_DIR}"
-python setup.py bdist_wheel
+python setup.py bdist_wheel --python-tag "${PY_VERSION}"
 
 echo "Wheel created at ${PY_PACKAGE_DIR}/dist/"
 ls -la "${PY_PACKAGE_DIR}/dist/"*.whl
