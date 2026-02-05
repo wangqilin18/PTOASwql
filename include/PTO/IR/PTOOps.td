@@ -65,7 +65,8 @@ def MakeTensorViewOp : PTO_Op<"make_tensor_view", [AttrSizedOperandSegments]> {
   let arguments = (ins
     AnyType:$ptr,
     Variadic<Index>:$shape,
-    Variadic<Index>:$strides
+    Variadic<Index>:$strides,
+    OptionalAttr<PTO_LayoutAttr>:$layout
   );
 
   let results = (outs AnyType:$result);
@@ -1184,6 +1185,60 @@ def GetSubBlockNumOp : PTO_Op<"get_subblock_num", [Pure]> {
   let results = (outs I64:$result);
 
   let assemblyFormat = "attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// High-Level Synchronization Ops
+//===----------------------------------------------------------------------===//
+
+def PTO_RecordEventOp : PTO_Op<"record_event"> {
+  let summary = "Record an event for synchronization (High Level)";
+  let description = [{
+    Records an event from a source operation type to a destination operation type.
+    Will be lowered to `pto.set_flag` based on op-to-pipe mapping.
+  }];
+  let arguments = (ins
+    PTO_SyncOpTypeAttr:$src_op,
+    PTO_SyncOpTypeAttr:$dst_op,
+    PTO_EventAttr:$event_id
+  );
+  let results = (outs);
+  let assemblyFormat = [{
+    `[` $src_op `,` $dst_op `,` $event_id `]` attr-dict
+  }];
+}
+
+def PTO_WaitEventOp : PTO_Op<"wait_event"> {
+  let summary = "Wait for an event (High Level)";
+  let description = [{
+    Waits for an event from a source operation type to a destination operation type.
+    Will be lowered to `pto.wait_flag` based on op-to-pipe mapping.
+  }];
+  let arguments = (ins
+    PTO_SyncOpTypeAttr:$src_op,
+    PTO_SyncOpTypeAttr:$dst_op,
+    PTO_EventAttr:$event_id
+  );
+  let results = (outs);
+  let assemblyFormat = [{
+    `[` $src_op `,` $dst_op `,` $event_id `]` attr-dict
+  }];
+}
+
+// High-Level Barrier (single pipe) with op type mapping
+def PTO_BarrierSyncOp : PTO_Op<"barrier_sync"> {
+  let summary = "High-level barrier mapped from SyncOpType to PIPE";
+  let description = [{
+    A convenience barrier that specifies a SyncOpType instead of PIPE. The lowering
+    pass maps the op type to the corresponding hardware pipe and emits `pto.barrier`.
+  }];
+  let arguments = (ins
+    PTO_SyncOpTypeAttr:$op_type
+  );
+  let results = (outs);
+  let assemblyFormat = [{
+    `[` $op_type `]` attr-dict
+  }];
 }
 
 //===----------------------------------------------------------------------===//
