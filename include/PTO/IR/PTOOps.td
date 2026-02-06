@@ -2268,21 +2268,17 @@ def PTO_ColSumOp_DPS : PTO_DpsOp<"colsum_dps", []> {
 
   let arguments = (ins
     PTODpsType:$src,
-    PTODpsType:$tmp,
+    Optional<PTODpsType>:$tmp,
     PTODpsType:$dst,
-    DefaultValuedAttr<BoolAttr, "false">:$isBinary
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$isBinary
   );
+
 
   let results = (outs);
 
   let hasVerifier = 1;
 
-  let assemblyFormat = [{
-    `ins` `(` $src `,` $tmp `:` qualified(type($src)) `,` qualified(type($tmp)) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    (`isBinary` `=` $isBinary^)? 
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 //===----------------------------------------------------------------------===//
 // TCVT (tilebuf, DPS)
@@ -3964,21 +3960,16 @@ def PTO_TColSumOp : PTO_TOp<"tcolsum", []> {
 
   let arguments = (ins
     PTODpsType:$src,
-    PTODpsType:$tmp,
+    Optional<PTODpsType>:$tmp,
     PTODpsType:$dst,
-    DefaultValuedAttr<BoolAttr, "false">:$isBinary
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$isBinary
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
 
-  let assemblyFormat = [{
-    `ins` `(` $src `,` $tmp `:` qualified(type($src)) `,` qualified(type($tmp)) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    (`isBinary` `=` $isBinary^)? 
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 def PTO_TCvtOp : PTO_TOp<"tcvt", []> {

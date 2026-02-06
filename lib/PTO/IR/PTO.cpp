@@ -1489,19 +1489,138 @@ LogicalResult pto::ColMinOp_DPS::verify() {
 
   return success();
 }
+
+//===----------------------------------------------------------------------===//
+// ColSumOp_DPS custom assembly format
+//===----------------------------------------------------------------------===//
+
+ParseResult mlir::pto::ColSumOp_DPS::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand src;
+  OpAsmParser::UnresolvedOperand tmp;
+  OpAsmParser::UnresolvedOperand dst;
+  Type srcTy, tmpTy, dstTy;
+  bool hasTmp = false;
+
+  // Parse: ins(%src : type) or ins(%src, %tmp {isBinary = ...}: type, type)
+  if (parser.parseKeyword("ins") || parser.parseLParen() || parser.parseOperand(src))
+    return failure();
+
+  // Check for optional tmp operand (format 2)
+  if (succeeded(parser.parseOptionalComma())) {
+    // Format 2: ins(%src, %tmp {isBinary = ...}: type, type)
+    if (parser.parseOperand(tmp))
+      return failure();
+    hasTmp = true;
+
+    // Parse attributes (isBinary)
+    if (parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+
+    // Parse types: : type, type
+    if (parser.parseColonType(srcTy) || parser.parseComma() || parser.parseType(tmpTy))
+      return failure();
+  } else {
+    // Format 1: ins(%src : type)
+    if (parser.parseColonType(srcTy))
+      return failure();
+  }
+
+  if (parser.parseRParen())
+    return failure();
+
+  // Parse: outs(%dst : type)
+  if (parser.parseKeyword("outs") || parser.parseLParen() ||
+      parser.parseOperand(dst) || parser.parseColonType(dstTy) ||
+      parser.parseRParen())
+    return failure();
+
+  // Parse any remaining attributes (for format 1)
+  if (!hasTmp) {
+    if (parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+  }
+
+  // Resolve operands
+  if (parser.resolveOperand(src, srcTy, result.operands))
+    return failure();
+
+  int32_t tmpSize = hasTmp ? 1 : 0;
+
+  if (hasTmp) {
+    if (parser.resolveOperand(tmp, tmpTy, result.operands))
+      return failure();
+  }
+
+  if (parser.resolveOperand(dst, dstTy, result.operands))
+    return failure();
+
+  return success();
+}
+
+void mlir::pto::ColSumOp_DPS::print(OpAsmPrinter &p) {
+  if (getTmp()) {
+    // Format 2: ins(%src, %tmp {isBinary = ...}: type, type) outs(%dst : type)
+    p << " ins(" << getSrc() << ", " << getTmp();
+    // Print isBinary attribute if present
+    SmallVector<StringRef, 1> elidedAttrs;
+    if (!getIsBinaryAttr() || getIsBinaryAttr().getValue() == false) {
+      elidedAttrs.push_back("isBinary");
+    }
+    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+    p << " : " << getSrc().getType() << ", " << getTmp().getType() << ")";
+  } else {
+    // Format 1: ins(%src : type) outs(%dst : type)
+    p << " ins(" << getSrc() << " : " << getSrc().getType() << ")";
+  }
+
+  p << " outs(" << getDst() << " : " << getDst().getType() << ")";
+
+  // Print remaining attributes for format 1 (excluding isBinary)
+  if (!getTmp()) {
+    SmallVector<StringRef, 1> elidedAttrs = {"isBinary"};
+    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+  }
+}
+
 LogicalResult pto::ColSumOp_DPS::verify() {
   auto srcTy = dyn_cast<mlir::MemRefType>(getSrc().getType());
-  auto tmpTy = dyn_cast<mlir::MemRefType>(getTmp().getType());
+  if (!srcTy)
+    return emitOpError("expects src to be memref");
+
   auto dstTy = dyn_cast<mlir::MemRefType>(getDst().getType());
-  if (!srcTy || !tmpTy || !dstTy)
-    return emitOpError("expects src/tmp/dst to be memref");
+  if (!dstTy)
+    return emitOpError("expects dst to be memref");
 
-  if (srcTy.getElementType() != dstTy.getElementType() ||
-      srcTy.getElementType() != tmpTy.getElementType())
-    return emitOpError("expects src/tmp/dst element types to match");
+  // Verify tmp and isBinary consistency: they must appear together or not at all
+  bool hasTmp = (bool)getTmp();
+  bool hasIsBinary = (bool)getIsBinaryAttr();
+  
+  if (hasTmp != hasIsBinary) {
+    if (hasTmp)
+      return emitOpError("tmp operand requires isBinary attribute");
+    else
+      return emitOpError("isBinary attribute requires tmp operand");
+  }
 
-  if (srcTy.getRank() != tmpTy.getRank())
-    return emitOpError("expects src/tmp to have same rank");
+  // If tmp is present, verify its type
+  if (getTmp()) {
+    auto tmpTy = dyn_cast<mlir::MemRefType>(getTmp().getType());
+    if (!tmpTy)
+      return emitOpError("expects tmp to be memref");
+
+    // Verify type relationships
+    if (srcTy.getElementType() != dstTy.getElementType() ||
+        srcTy.getElementType() != tmpTy.getElementType())
+      return emitOpError("expects src/tmp/dst element types to match");
+
+    if (srcTy.getRank() != tmpTy.getRank())
+      return emitOpError("expects src/tmp to have same rank");
+  }
+
+  // Verify src/dst relationships
+  if (srcTy.getElementType() != dstTy.getElementType())
+    return emitOpError("expects src/dst element types to match");
+
   if (srcTy.getRank() != dstTy.getRank())
     return emitOpError("expects dst to have same rank as src");
 
@@ -1511,9 +1630,12 @@ LogicalResult pto::ColSumOp_DPS::verify() {
     if (srcC != ShapedType::kDynamic && dstC != ShapedType::kDynamic && srcC != dstC)
       return emitOpError("expects src/dst to have same number of columns (dim1)");
 
-    int64_t tmpC = tmpTy.getShape()[1];
-    if (srcC != ShapedType::kDynamic && tmpC != ShapedType::kDynamic && srcC != tmpC)
-      return emitOpError("expects src/tmp to have same number of columns (dim1)");
+    if (getTmp()) {
+      auto tmpTy = dyn_cast<mlir::MemRefType>(getTmp().getType());
+      int64_t tmpC = tmpTy.getShape()[1];
+      if (srcC != ShapedType::kDynamic && tmpC != ShapedType::kDynamic && srcC != tmpC)
+        return emitOpError("expects src/tmp to have same number of columns (dim1)");
+    }
   }
 
   if (dstTy.getRank() >= 1) {
@@ -3556,19 +3678,138 @@ LogicalResult pto::TColMinOp::verify() {
 
   return success();
 }
+
+//===----------------------------------------------------------------------===//
+// TColSumOp custom assembly format
+//===----------------------------------------------------------------------===//
+
+ParseResult mlir::pto::TColSumOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand src;
+  OpAsmParser::UnresolvedOperand tmp;
+  OpAsmParser::UnresolvedOperand dst;
+  Type srcTy, tmpTy, dstTy;
+  bool hasTmp = false;
+
+  // Parse: ins(%src : type) or ins(%src, %tmp {isBinary = ...}: type, type)
+  if (parser.parseKeyword("ins") || parser.parseLParen() || parser.parseOperand(src))
+    return failure();
+
+  // Check for optional tmp operand (format 2)
+  if (succeeded(parser.parseOptionalComma())) {
+    // Format 2: ins(%src, %tmp {isBinary = ...}: type, type)
+    if (parser.parseOperand(tmp))
+      return failure();
+    hasTmp = true;
+
+    // Parse attributes (isBinary)
+    if (parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+
+    // Parse types: : type, type
+    if (parser.parseColonType(srcTy) || parser.parseComma() || parser.parseType(tmpTy))
+      return failure();
+  } else {
+    // Format 1: ins(%src : type)
+    if (parser.parseColonType(srcTy))
+      return failure();
+  }
+
+  if (parser.parseRParen())
+    return failure();
+
+  // Parse: outs(%dst : type)
+  if (parser.parseKeyword("outs") || parser.parseLParen() ||
+      parser.parseOperand(dst) || parser.parseColonType(dstTy) ||
+      parser.parseRParen())
+    return failure();
+
+  // Parse any remaining attributes (for format 1)
+  if (!hasTmp) {
+    if (parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+  }
+
+  // Resolve operands
+  if (parser.resolveOperand(src, srcTy, result.operands))
+    return failure();
+
+  int32_t tmpSize = hasTmp ? 1 : 0;
+
+  if (hasTmp) {
+    if (parser.resolveOperand(tmp, tmpTy, result.operands))
+      return failure();
+  }
+
+  if (parser.resolveOperand(dst, dstTy, result.operands))
+    return failure();
+
+  return success();
+}
+
+void mlir::pto::TColSumOp::print(OpAsmPrinter &p) {
+  if (getTmp()) {
+    // Format 2: ins(%src, %tmp {isBinary = ...}: type, type) outs(%dst : type)
+    p << " ins(" << getSrc() << ", " << getTmp();
+    // Print isBinary attribute if present
+    SmallVector<StringRef, 1> elidedAttrs;
+    if (!getIsBinaryAttr() || getIsBinaryAttr().getValue() == false) {
+      elidedAttrs.push_back("isBinary");
+    }
+    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+    p << " : " << getSrc().getType() << ", " << getTmp().getType() << ")";
+  } else {
+    // Format 1: ins(%src : type) outs(%dst : type)
+    p << " ins(" << getSrc() << " : " << getSrc().getType() << ")";
+  }
+
+  p << " outs(" << getDst() << " : " << getDst().getType() << ")";
+
+  // Print remaining attributes for format 1 (excluding isBinary)
+  if (!getTmp()) {
+    SmallVector<StringRef, 1> elidedAttrs = {"isBinary"};
+    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
+  }
+}
+
 LogicalResult pto::TColSumOp::verify() {
   auto srcTy = dyn_cast<mlir::pto::TileBufType>(getSrc().getType());
-  auto tmpTy = dyn_cast<mlir::pto::TileBufType>(getTmp().getType());
+  if (!srcTy)
+    return emitOpError("expects src to be tilebuf");
+
   auto dstTy = dyn_cast<mlir::pto::TileBufType>(getDst().getType());
-  if (!srcTy || !tmpTy || !dstTy)
-    return emitOpError("expects src/tmp/dst to be tilebuf");
+  if (!dstTy)
+    return emitOpError("expects dst to be tilebuf");
 
-  if (srcTy.getElementType() != dstTy.getElementType() ||
-      srcTy.getElementType() != tmpTy.getElementType())
-    return emitOpError("expects src/tmp/dst element types to match");
+  // Verify tmp and isBinary consistency: they must appear together or not at all
+  bool hasTmp = (bool)getTmp();
+  bool hasIsBinary = (bool)getIsBinaryAttr();
+  
+  if (hasTmp != hasIsBinary) {
+    if (hasTmp)
+      return emitOpError("tmp operand requires isBinary attribute");
+    else
+      return emitOpError("isBinary attribute requires tmp operand");
+  }
 
-  if (srcTy.getRank() != tmpTy.getRank())
-    return emitOpError("expects src/tmp to have same rank");
+  // If tmp is present, verify its type
+  if (getTmp()) {
+    auto tmpTy = dyn_cast<mlir::pto::TileBufType>(getTmp().getType());
+    if (!tmpTy)
+      return emitOpError("expects tmp to be tilebuf");
+
+    // Verify type relationships
+    if (srcTy.getElementType() != dstTy.getElementType() ||
+        srcTy.getElementType() != tmpTy.getElementType())
+      return emitOpError("expects src/tmp/dst element types to match");
+
+    if (srcTy.getRank() != tmpTy.getRank())
+      return emitOpError("expects src/tmp to have same rank");
+  }
+
+  // Verify src/dst relationships
+  if (srcTy.getElementType() != dstTy.getElementType())
+    return emitOpError("expects src/dst element types to match");
+
   if (srcTy.getRank() != dstTy.getRank())
     return emitOpError("expects dst to have same rank as src");
 
@@ -3578,9 +3819,12 @@ LogicalResult pto::TColSumOp::verify() {
     if (srcC != ShapedType::kDynamic && dstC != ShapedType::kDynamic && srcC != dstC)
       return emitOpError("expects src/dst to have same number of columns (dim1)");
 
-    int64_t tmpC = tmpTy.getShape()[1];
-    if (srcC != ShapedType::kDynamic && tmpC != ShapedType::kDynamic && srcC != tmpC)
-      return emitOpError("expects src/tmp to have same number of columns (dim1)");
+    if (getTmp()) {
+      auto tmpTy = dyn_cast<mlir::pto::TileBufType>(getTmp().getType());
+      int64_t tmpC = tmpTy.getShape()[1];
+      if (srcC != ShapedType::kDynamic && tmpC != ShapedType::kDynamic && srcC != tmpC)
+        return emitOpError("expects src/tmp to have same number of columns (dim1)");
+    }
   }
 
   if (dstTy.getRank() >= 1) {

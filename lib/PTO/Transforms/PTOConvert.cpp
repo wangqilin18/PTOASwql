@@ -2254,23 +2254,34 @@ struct PTOColSumToEmitC : public OpConversionPattern<pto::ColSumOp_DPS> {
     auto *ctx = rewriter.getContext();
 
     Value src = peelUnrealized(adaptor.getSrc());
-    Value tmp = peelUnrealized(adaptor.getTmp());
     Value dst = peelUnrealized(adaptor.getDst());
 
-    bool isBinary = false;
-    if (auto a = op.getIsBinaryAttr())
-      isBinary = a.getValue();
+    // Check if tmp exists before accessing it
+    if (op.getTmp()) {
+      // Format 2: with tmp and isBinary
+      Value tmp = peelUnrealized(adaptor.getTmp());
+      bool isBinary = false;
+      if (auto a = op.getIsBinaryAttr())
+        isBinary = a.getValue();
 
-    auto boolTy = emitc::OpaqueType::get(ctx, "bool");
-    auto tok = isBinary ? "true" : "false";
-    Value isBinaryVal = rewriter.create<emitc::ConstantOp>(
-        loc, boolTy, emitc::OpaqueAttr::get(ctx, tok));
+      auto boolTy = emitc::OpaqueType::get(ctx, "bool");
+      auto tok = isBinary ? "true" : "false";
+      Value isBinaryVal = rewriter.create<emitc::ConstantOp>(
+          loc, boolTy, emitc::OpaqueAttr::get(ctx, tok));
 
-    rewriter.create<emitc::CallOpaqueOp>(
-        loc, TypeRange{}, "TCOLSUM",
-        /*args=*/ArrayAttr(),             
-        /*templateArgs=*/ArrayAttr(),
-        /*operands=*/ValueRange{dst, src, tmp, isBinaryVal});
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TCOLSUM",
+          /*args=*/ArrayAttr(),             
+          /*templateArgs=*/ArrayAttr(),
+          /*operands=*/ValueRange{dst, src, tmp, isBinaryVal});
+    } else {
+      // Format 1: without tmp and isBinary
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TCOLSUM",
+          /*args=*/ArrayAttr(),             
+          /*templateArgs=*/ArrayAttr(),
+          /*operands=*/ValueRange{dst, src});
+    }
 
     rewriter.eraseOp(op);
     return success();
