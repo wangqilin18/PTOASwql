@@ -2675,27 +2675,32 @@ def PTO_MovFPOp_DPS : PTO_DpsOp<"mov.fp_dps", []> {
   }];
 }
 //===----------------------------------------------------------------------===//
-// PTOOps.td  (add TMRGSORT DPS/tilebuf op - single-list variant)
+// PTOOps.td  (add TMRGSORT DPS/tilebuf op - two formats: 1 tile+blockLen+dst or 4 tiles)
 //===----------------------------------------------------------------------===//
 
-def PTO_MrgSortOp_DPS : PTO_DpsOp<"mrgsort_dps", []> {
-  let summary = "TMRGSORT: merge sort (single-list variant) (tilebuf, DPS)";
+def PTO_MrgSortOp_DPS : PTO_DpsOp<"mrgsort_dps", [AttrSizedOperandSegments]> {
+  let summary = "TMRGSORT: merge sort (format1: ins(src,blockLen) out(dst); format2: ins(src0..src3) outs(dst,executed))";
 
   let arguments = (ins
-    PTODpsType:$src,
-    PTODpsType:$dst,
-    I32Attr:$blockLen
+    Variadic<PTODpsType>:$srcs,
+    Optional<AnyInteger>:$blockLen,
+    Variadic<PTODpsType>:$dsts,
+    Optional<AnyType>:$excuted,
+    DefaultValuedAttr<BoolAttr, "false">:$exhausted
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
 
-  let assemblyFormat = [{
-    `ins` `(` $src `:` qualified(type($src)) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    `blockLen` `=` $blockLen
-    attr-dict
+  let extraClassDeclaration = [{
+    bool isFormat1() { return getSrcs().size() == 1u && getBlockLen() && getDsts().size() == 1u; }
+    bool isFormat2() { return getSrcs().size() == 4u && getDsts().size() == 1u && getExcuted(); }
+    Value getSrc() { return getSrcs().front(); }
+    Value getDst() { return getDsts().front(); }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstsMutable(); }
+    void print(::mlir::OpAsmPrinter &p);
+    static ::mlir::ParseResult parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result);
   }];
 }
 //===----------------------------------------------------------------------===//
@@ -4291,24 +4296,29 @@ def PTO_TMovFPOp : PTO_TOp<"tmov.fp", []> {
   }];
 }
 
-def PTO_TMrgSortOp: PTO_TOp<"tmrgsort", []> {
-  let summary = "TMRGSORT: Merge sort for multiple sorted lists.";
+def PTO_TMrgSortOp: PTO_TOp<"tmrgsort", [AttrSizedOperandSegments]> {
+  let summary = "TMRGSORT: Merge sort (format1: ins(src,blockLen) out(dst); format2: ins(src0..src3) outs(dst,executed)).";
 
   let arguments = (ins
-    PTODpsType:$src,
-    PTODpsType:$dst,
-    I32Attr:$blockLen
+    Variadic<PTODpsType>:$srcs,
+    Optional<AnyInteger>:$blockLen,
+    Variadic<PTODpsType>:$dsts,
+    Optional<AnyType>:$excuted,
+    DefaultValuedAttr<BoolAttr, "false">:$exhausted
   );
 
   let results = (outs);
 
   let hasVerifier = 1;
 
-  let assemblyFormat = [{
-    `ins` `(` $src `:` qualified(type($src)) `)`
-    `outs` `(` $dst `:` qualified(type($dst) ) `)`
-    `blockLen` `=` $blockLen
-    attr-dict
+  let extraClassDeclaration = [{
+    bool isFormat1() { return getSrcs().size() == 1u && getBlockLen() && getDsts().size() == 1u; }
+    bool isFormat2() { return getSrcs().size() == 4u && getDsts().size() == 1u && getExcuted(); }
+    Value getSrc() { return getSrcs().front(); }
+    Value getDst() { return getDsts().front(); }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstsMutable(); }
+    void print(::mlir::OpAsmPrinter &p);
+    static ::mlir::ParseResult parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result);
   }];
 }
 

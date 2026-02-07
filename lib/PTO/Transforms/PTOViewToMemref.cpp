@@ -1813,24 +1813,62 @@ struct PTOViewToMemrefPass
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
 
-        Value src = op.getSrc();
-        Value dst = op.getDst();
-        uint32_t blockLen = op.getBlockLen();
+        if (op.isFormat1()) {
+          Value src = op.getSrc();
+          Value dst = op.getDst();
+          Value blockLenVal = op.getBlockLen();
 
-        auto srcTy = dyn_cast<MemRefType>(src.getType());
-        auto dstTy = dyn_cast<MemRefType>(dst.getType());
-        if (!srcTy || !dstTy) {
-          op.emitError("ins/outs are not memref yet");
+          auto srcTy = dyn_cast<MemRefType>(src.getType());
+          auto dstTy = dyn_cast<MemRefType>(dst.getType());
+          if (!srcTy || !dstTy) {
+            op.emitError("ins/outs are not memref yet");
+            signalPassFailure();
+            return;
+          }
+
+          rewriter.replaceOpWithNewOp<pto::MrgSortOp_DPS>(
+              op,
+              TypeRange{},
+              ValueRange{src},
+              blockLenVal,
+              ValueRange{dst},
+              Value() /*excuted*/,
+              op.getExhaustedAttr());
+        } else if (op.isFormat2()) {
+          bool allMemRef = true;
+          for (Value v : op.getSrcs())
+            if (!dyn_cast<MemRefType>(v.getType())) { allMemRef = false; break; }
+          if (!allMemRef) {
+            op.emitError("format2 ins/outs are not memref yet");
+            signalPassFailure();
+            return;
+          }
+          Value dst = op.getDst();
+          Value excuted = op.getExcuted();
+          if (!dyn_cast<MemRefType>(dst.getType())) {
+            op.emitError("format2 outs(dst) must be memref");
+            signalPassFailure();
+            return;
+          }
+          if (!dyn_cast<VectorType>(excuted.getType())) {
+            op.emitError("format2 outs(excuted) must be vector");
+            signalPassFailure();
+            return;
+          }
+
+          rewriter.replaceOpWithNewOp<pto::MrgSortOp_DPS>(
+              op,
+              TypeRange{},
+              op.getSrcs(),
+              Value() /*blockLen*/,
+              ValueRange{dst},
+              excuted,
+              op.getExhaustedAttr());
+        } else {
+          op.emitError("tmrgsort must be format1 or format2");
           signalPassFailure();
           return;
         }
-
-        rewriter.replaceOpWithNewOp<pto::MrgSortOp_DPS>(
-            op,
-            TypeRange{},
-            src,
-            dst,
-            blockLen);
       }
 
       SmallVector<mlir::pto::TNegOp, 8> negops;
