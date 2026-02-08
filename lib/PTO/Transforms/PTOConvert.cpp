@@ -199,17 +199,74 @@ struct ArithCastOPToEmitC : public OpConversionPattern<arith::IndexCastOp> {
   LogicalResult
   matchAndRewrite(arith::IndexCastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, op.getType(), op.getIn());
-
+    Type newTy = getTypeConverter()->convertType(op.getType());
+    if (!newTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, newTy, adaptor.getIn());
     return success();
   }
 };
 
-	struct ArithConstantToEmitC : public OpConversionPattern<arith::ConstantOp> {
-	  using OpConversionPattern<arith::ConstantOp>::OpConversionPattern;
-	
-	  LogicalResult matchAndRewrite(arith::ConstantOp op, OpAdaptor adaptor,
-	                                ConversionPatternRewriter &rewriter) const override {
+struct ArithSubIToEmitC : public OpConversionPattern<arith::SubIOp> {
+  using OpConversionPattern<arith::SubIOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::SubIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type newTy = getTypeConverter()->convertType(op.getType());
+    if (!newTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::SubOp>(op, newTy, adaptor.getLhs(),
+                                              adaptor.getRhs());
+    return success();
+  }
+};
+
+struct ArithDivSIToEmitC : public OpConversionPattern<arith::DivSIOp> {
+  using OpConversionPattern<arith::DivSIOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::DivSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type newTy = getTypeConverter()->convertType(op.getType());
+    if (!newTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::DivOp>(op, newTy, adaptor.getLhs(),
+                                              adaptor.getRhs());
+    return success();
+  }
+};
+
+struct ArithRemSIToEmitC : public OpConversionPattern<arith::RemSIOp> {
+  using OpConversionPattern<arith::RemSIOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::RemSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type newTy = getTypeConverter()->convertType(op.getType());
+    if (!newTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::RemOp>(op, newTy, adaptor.getLhs(),
+                                              adaptor.getRhs());
+    return success();
+  }
+};
+
+struct ArithTruncIToEmitC : public OpConversionPattern<arith::TruncIOp> {
+  using OpConversionPattern<arith::TruncIOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::TruncIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type newTy = getTypeConverter()->convertType(op.getType());
+    if (!newTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, newTy, adaptor.getIn());
+    return success();
+  }
+};
+
+		struct ArithConstantToEmitC : public OpConversionPattern<arith::ConstantOp> {
+		  using OpConversionPattern<arith::ConstantOp>::OpConversionPattern;
+		
+		  LogicalResult matchAndRewrite(arith::ConstantOp op, OpAdaptor adaptor,
+		                                ConversionPatternRewriter &rewriter) const override {
 	    Type newType = getTypeConverter()->convertType(op.getType());
 	    if (!newType) return failure();
 	
@@ -218,14 +275,21 @@ struct ArithCastOPToEmitC : public OpConversionPattern<arith::IndexCastOp> {
 	    Attribute valueAttr = adaptor.getValue();
 	    if (!valueAttr) valueAttr = op.getValue();
 
-	    if (auto floatAttr = dyn_cast_or_null<FloatAttr>(valueAttr)) {
-	      SmallString<32> valStr;
-	      floatAttr.getValue().toString(valStr);
-	      valStr.append("f");
-	      auto constAttr = emitc::OpaqueAttr::get(rewriter.getContext(), valStr);
-	      rewriter.replaceOpWithNewOp<emitc::ConstantOp>(op, newType, constAttr);
-	      return success();
-	    }
+		    if (auto floatAttr = dyn_cast_or_null<FloatAttr>(valueAttr)) {
+		      SmallString<32> valStr;
+		      floatAttr.getValue().toString(valStr);
+		      // Ensure the literal parses as a floating-point constant in C/C++.
+		      // E.g. "0f" and "1f" are invalid; we want "0.0f" / "1.0f".
+		      if (valStr.find('.') == StringRef::npos &&
+		          valStr.find('e') == StringRef::npos &&
+		          valStr.find('E') == StringRef::npos) {
+		        valStr.append(".0");
+		      }
+		      valStr.append("f");
+		      auto constAttr = emitc::OpaqueAttr::get(rewriter.getContext(), valStr);
+		      rewriter.replaceOpWithNewOp<emitc::ConstantOp>(op, newType, constAttr);
+		      return success();
+		    }
 	
 	    if (auto intAttr = dyn_cast_or_null<IntegerAttr>(valueAttr)) {
 	      std::string valStr = std::to_string(intAttr.getValue().getSExtValue());
@@ -4269,6 +4333,9 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOMaxSToEmitC>(typeConverter, ctx);
   patterns.add<ArithMulIToEmitC>(typeConverter, ctx);
   patterns.add<ArithAddIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithSubIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithDivSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithRemSIToEmitC>(typeConverter, ctx);
   patterns.add<PTOAddSToTADDS>(typeConverter, ctx);
   patterns.add<PTOColExpandToEmitC>(typeConverter, ctx);
   patterns.add<PTOColMaxToEmitC>(typeConverter, ctx);
@@ -4289,6 +4356,7 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOAddToTADD>(typeConverter, ctx);
   patterns.add<PTOAddSCToTADDSC>(typeConverter, ctx);
   patterns.add<ArithCastOPToEmitC>(typeConverter, ctx);
+  patterns.add<ArithTruncIToEmitC>(typeConverter, ctx);
   patterns.add<PTOSyncSetToEmitC>(typeConverter, ctx);
   patterns.add<PTOSyncWaitToEmitC>(typeConverter, ctx);
   patterns.add<SectionToEmitC<pto::SectionCubeOp>>(typeConverter, ctx);
