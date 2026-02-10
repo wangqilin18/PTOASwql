@@ -69,6 +69,7 @@ public:
     addConversion([Ctx](FloatType type) -> Type {
       if (type.isF32()) return emitc::OpaqueType::get(Ctx, "float");
       if (type.isF16()) return emitc::OpaqueType::get(Ctx, "half");
+      if (type.isF64()) return emitc::OpaqueType::get(Ctx, "double");
       llvm::errs() << "[Debug] Unsupported FloatType: " << type << "\n";
       return Type{};
     });
@@ -79,11 +80,27 @@ public:
       // 在打印 C++ 代码时，i1 会自动打印为 bool。
       //if (type.getWidth() == 1) return IntegerType::get(Ctx, 1); 
       if (type.getWidth() == 1) return type; // <--- 保持 i1 不变
-      
-      if (type.getWidth() == 32) return emitc::OpaqueType::get(Ctx, "int32_t");
-      if (type.getWidth() == 64) return emitc::OpaqueType::get(Ctx, "int64_t");
-      llvm::errs() << "[Debug] Unsupported IntegerType width: " << type.getWidth() << "\n";
-      return emitc::OpaqueType::get(Ctx, "int32_t"); // Fallback
+
+      // Prefer fixed-width C types. Preserve signedness if the MLIR integer is
+      // explicitly signed/unsigned; treat signless as signed by default.
+      const bool isUnsigned = type.isUnsignedInteger();
+      switch (type.getWidth()) {
+      case 8:
+        return emitc::OpaqueType::get(Ctx, isUnsigned ? "uint8_t" : "int8_t");
+      case 16:
+        return emitc::OpaqueType::get(Ctx,
+                                      isUnsigned ? "uint16_t" : "int16_t");
+      case 32:
+        return emitc::OpaqueType::get(Ctx,
+                                      isUnsigned ? "uint32_t" : "int32_t");
+      case 64:
+        return emitc::OpaqueType::get(Ctx,
+                                      isUnsigned ? "uint64_t" : "int64_t");
+      default:
+        llvm::errs() << "[Debug] Unsupported IntegerType width: "
+                     << type.getWidth() << "\n";
+        return emitc::OpaqueType::get(Ctx, "int32_t"); // Fallback
+      }
     });
 
     addConversion([Ctx](IndexType type) -> Type {
@@ -174,19 +191,1391 @@ public:
       if (Inputs.size() != 1) return Value();
       return Builder.create<UnrealizedConversionCastOp>(Loc, ResultType, Inputs[0]).getResult(0);
     };
+
     addSourceMaterialization(materializeCast);
     addTargetMaterialization(materializeCast);
   }
 };
+
+static constexpr unsigned kPTOIndexBitWidth =
+    32; // keep consistent with IndexType conversion
+
+// Forward declarations (definitions below).
+static emitc::OpaqueType getSignedIntOpaqueType(MLIRContext *ctx,
+                                                unsigned bitWidth);
+static emitc::OpaqueType getUnsignedIntOpaqueType(MLIRContext *ctx,
+                                                  unsigned bitWidth);
+static emitc::OpaqueType getWiderSignedIntOpaqueType(MLIRContext *ctx,
+                                                     unsigned bitWidth);
+static emitc::OpaqueType getWiderUnsignedIntOpaqueType(MLIRContext *ctx,
+                                                       unsigned bitWidth);
+static Value makeEmitCOpaqueConstant(ConversionPatternRewriter &rewriter,
+                                     Location loc, Type type,
+                                     llvm::StringRef literal);
+static Value makeEmitCIntConstant(ConversionPatternRewriter &rewriter,
+                                  Location loc, Type type, int64_t value);
+static Value emitCCast(ConversionPatternRewriter &rewriter, Location loc,
+                       Type dstType, Value src);
+static Value castSignlessIntToUnsignedSameWidth(ConversionPatternRewriter &rewriter,
+                                                Location loc, Value v,
+                                                unsigned bitWidth);
+
+//===----------------------------------------------------------------------===//
+// Arith -> EmitC (full dialect coverage for scalar ops)
+//===----------------------------------------------------------------------===//
+
+template <typename ArithOp, typename EmitCOp>
+struct ArithSimpleBinaryToEmitC : public OpConversionPattern<ArithOp> {
+  using OpConversionPattern<ArithOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ArithOp op, typename ArithOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type dstTy = this->getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<EmitCOp>(op, dstTy, adaptor.getOperands());
+    return success();
+  }
+};
+
+// Integer bitwise ops (andi/ori/xori) on signless integers: perform in unsigned
+// to avoid signedness pitfalls, then cast back.
+template <typename ArithOp, typename EmitCOp>
+struct ArithUnsignedBitwiseBinaryToEmitC : public OpConversionPattern<ArithOp> {
+  using OpConversionPattern<ArithOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ArithOp op, typename ArithOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = this->getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    if (intTy.getWidth() == 1) {
+      rewriter.replaceOpWithNewOp<EmitCOp>(op, intTy, adaptor.getLhs(),
+                                           adaptor.getRhs());
+      return success();
+    }
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value resU = rewriter.create<EmitCOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, resU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithDivUIToEmitC : public OpConversionPattern<arith::DivUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::DivUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value divU = rewriter.create<emitc::DivOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, divU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithRemUIToEmitC : public OpConversionPattern<arith::RemUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::RemUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value remU = rewriter.create<emitc::RemOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, remU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithCeilDivUIToEmitC : public OpConversionPattern<arith::CeilDivUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::CeilDivUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value one = makeEmitCIntConstant(rewriter, loc, uTy, 1);
+    Value rhsMinusOne = rewriter.create<emitc::SubOp>(loc, uTy, rhsU, one);
+    Value num = rewriter.create<emitc::AddOp>(loc, uTy, lhsU, rhsMinusOne);
+    Value divU = rewriter.create<emitc::DivOp>(loc, uTy, num, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, divU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithCeilDivSIToEmitC : public OpConversionPattern<arith::CeilDivSIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::CeilDivSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    Value zero = makeEmitCIntConstant(rewriter, loc, dstTy, 0);
+    Value one = makeEmitCIntConstant(rewriter, loc, dstTy, 1);
+
+    Value q0 = rewriter.create<emitc::DivOp>(loc, dstTy, adaptor.getLhs(),
+                                             adaptor.getRhs());
+    Value r = rewriter.create<emitc::RemOp>(loc, dstTy, adaptor.getLhs(),
+                                            adaptor.getRhs());
+
+    Value rNeZero = rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                                  emitc::CmpPredicate::ne, r,
+                                                  zero);
+    Value lhsLt0 =
+        rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                      emitc::CmpPredicate::lt, adaptor.getLhs(),
+                                      zero);
+    Value rhsLt0 =
+        rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                      emitc::CmpPredicate::lt, adaptor.getRhs(),
+                                      zero);
+    Value signsSame =
+        rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                      emitc::CmpPredicate::eq, lhsLt0, rhsLt0);
+    Value adjust =
+        rewriter.create<emitc::LogicalAndOp>(loc, rewriter.getI1Type(),
+                                             rNeZero, signsSame);
+
+    Value qPlusOne = rewriter.create<emitc::AddOp>(loc, dstTy, q0, one);
+    Value result = rewriter.create<emitc::ConditionalOp>(loc, dstTy, adjust,
+                                                         qPlusOne, q0);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithFloorDivSIToEmitC : public OpConversionPattern<arith::FloorDivSIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::FloorDivSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    Value zero = makeEmitCIntConstant(rewriter, loc, dstTy, 0);
+    Value one = makeEmitCIntConstant(rewriter, loc, dstTy, 1);
+
+    Value q0 = rewriter.create<emitc::DivOp>(loc, dstTy, adaptor.getLhs(),
+                                             adaptor.getRhs());
+    Value r = rewriter.create<emitc::RemOp>(loc, dstTy, adaptor.getLhs(),
+                                            adaptor.getRhs());
+
+    Value rNeZero = rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                                  emitc::CmpPredicate::ne, r,
+                                                  zero);
+    Value lhsLt0 =
+        rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                      emitc::CmpPredicate::lt, adaptor.getLhs(),
+                                      zero);
+    Value rhsLt0 =
+        rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                      emitc::CmpPredicate::lt, adaptor.getRhs(),
+                                      zero);
+    Value signsDifferent =
+        rewriter.create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                      emitc::CmpPredicate::ne, lhsLt0, rhsLt0);
+    Value adjust =
+        rewriter.create<emitc::LogicalAndOp>(loc, rewriter.getI1Type(),
+                                             rNeZero, signsDifferent);
+
+    Value qMinusOne = rewriter.create<emitc::SubOp>(loc, dstTy, q0, one);
+    Value result = rewriter.create<emitc::ConditionalOp>(loc, dstTy, adjust,
+                                                         qMinusOne, q0);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithShiftLeftToEmitC : public OpConversionPattern<arith::ShLIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::ShLIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    if (intTy.getWidth() == 1) {
+      // Compute on u8 and truncate to i1.
+      auto u8Ty = getUnsignedIntOpaqueType(rewriter.getContext(), 8);
+      Value lhsU8 = emitCCast(rewriter, loc, u8Ty, adaptor.getLhs());
+      Value rhsU8 = emitCCast(rewriter, loc, u8Ty, adaptor.getRhs());
+      Value sh = rewriter.create<emitc::BitwiseLeftShiftOp>(loc, u8Ty, lhsU8,
+                                                            rhsU8);
+      Value masked =
+          rewriter.create<emitc::BitwiseAndOp>(loc, u8Ty, sh,
+                                               makeEmitCIntConstant(rewriter, loc,
+                                                                    u8Ty, 1));
+      rewriter.replaceOp(op, emitCCast(rewriter, loc, dstTy, masked));
+      return success();
+    }
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value shU =
+        rewriter.create<emitc::BitwiseLeftShiftOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, shU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithShiftRightUIToEmitC : public OpConversionPattern<arith::ShRUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::ShRUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    if (intTy.getWidth() == 1) {
+      // (x >> y) on i1 is either x (y==0) or 0 (y!=0); approximate in u8.
+      auto u8Ty = getUnsignedIntOpaqueType(rewriter.getContext(), 8);
+      Value lhsU8 = emitCCast(rewriter, loc, u8Ty, adaptor.getLhs());
+      Value rhsU8 = emitCCast(rewriter, loc, u8Ty, adaptor.getRhs());
+      Value sh = rewriter.create<emitc::BitwiseRightShiftOp>(loc, u8Ty, lhsU8,
+                                                             rhsU8);
+      Value masked =
+          rewriter.create<emitc::BitwiseAndOp>(loc, u8Ty, sh,
+                                               makeEmitCIntConstant(rewriter, loc,
+                                                                    u8Ty, 1));
+      rewriter.replaceOp(op, emitCCast(rewriter, loc, dstTy, masked));
+      return success();
+    }
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value shU =
+        rewriter.create<emitc::BitwiseRightShiftOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, shU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithShiftRightSIToEmitC : public OpConversionPattern<arith::ShRSIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::ShRSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    if (intTy.getWidth() == 1) {
+      // (x >> y) on i1 is either x (y==0) or 0 (y!=0); approximate in u8.
+      auto u8Ty = getUnsignedIntOpaqueType(rewriter.getContext(), 8);
+      Value lhsU8 = emitCCast(rewriter, loc, u8Ty, adaptor.getLhs());
+      Value rhsU8 = emitCCast(rewriter, loc, u8Ty, adaptor.getRhs());
+      Value sh = rewriter.create<emitc::BitwiseRightShiftOp>(loc, u8Ty, lhsU8,
+                                                             rhsU8);
+      Value masked =
+          rewriter.create<emitc::BitwiseAndOp>(loc, u8Ty, sh,
+                                               makeEmitCIntConstant(rewriter, loc,
+                                                                    u8Ty, 1));
+      rewriter.replaceOp(op, emitCCast(rewriter, loc, dstTy, masked));
+      return success();
+    }
+
+    // Signed arithmetic shift; cast RHS to unsigned to interpret shift amount.
+    auto uShiftTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value sh =
+        rewriter.create<emitc::BitwiseRightShiftOp>(loc, dstTy, adaptor.getLhs(),
+                                                    rhsU);
+    rewriter.replaceOp(op, sh);
+    return success();
+  }
+};
+
+struct ArithNegFToEmitC : public OpConversionPattern<arith::NegFOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::NegFOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::UnaryMinusOp>(op, dstTy, adaptor.getOperand());
+    return success();
+  }
+};
+
+struct ArithRemFToEmitC : public OpConversionPattern<arith::RemFOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::RemFOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    // Use builtin `fmod` when possible. For f16, compute in float and cast back.
+    Type callTy = dstTy;
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+
+    if (auto opFloatTy = dyn_cast<FloatType>(op.getType())) {
+      if (opFloatTy.isF16()) {
+        auto f32Ty = emitc::OpaqueType::get(rewriter.getContext(), "float");
+        lhs = emitCCast(rewriter, loc, f32Ty, lhs);
+        rhs = emitCCast(rewriter, loc, f32Ty, rhs);
+        callTy = f32Ty;
+      }
+    }
+
+    // Prefer `__builtin_fmod*` to avoid relying on extra headers.
+    llvm::StringRef callee = "__builtin_fmod";
+    if (auto opFloatTy = dyn_cast<FloatType>(op.getType())) {
+      if (opFloatTy.isF32() || opFloatTy.isF16())
+        callee = "__builtin_fmodf";
+      else if (opFloatTy.isF64())
+        callee = "__builtin_fmod";
+    }
+
+    auto call = rewriter.create<emitc::CallOpaqueOp>(
+        loc, TypeRange{callTy}, callee, ValueRange{lhs, rhs},
+        /*args=*/ArrayAttr{}, /*template_args=*/ArrayAttr{});
+    Value result = call.getResult(0);
+    if (callTy != dstTy)
+      result = emitCCast(rewriter, loc, dstTy, result);
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithSelectToEmitC : public OpConversionPattern<arith::SelectOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (!op.getCondition().getType().isInteger(1))
+      return rewriter.notifyMatchFailure(
+          op, "only scalar i1 conditions supported for arith.select");
+
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    auto cond =
+        rewriter.create<emitc::ConditionalOp>(op.getLoc(), dstTy,
+                                              adaptor.getCondition(),
+                                              adaptor.getTrueValue(),
+                                              adaptor.getFalseValue());
+    rewriter.replaceOp(op, cond.getResult());
+    return success();
+  }
+};
+
+struct ArithExtUIToEmitC : public OpConversionPattern<arith::ExtUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::ExtUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto dstIntTy = dyn_cast<IntegerType>(op.getType());
+    auto srcIntTy = dyn_cast<IntegerType>(op.getIn().getType());
+    if (!dstIntTy || !srcIntTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer types");
+
+    Type dstTy = getTypeConverter()->convertType(dstIntTy);
+    if (!dstTy)
+      return failure();
+
+    // i1 -> iN: bool to integer already behaves as 0/1.
+    if (srcIntTy.getWidth() == 1) {
+      rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+      return success();
+    }
+
+    auto uSrcTy =
+        getUnsignedIntOpaqueType(rewriter.getContext(), srcIntTy.getWidth());
+    auto uDstTy =
+        getUnsignedIntOpaqueType(rewriter.getContext(), dstIntTy.getWidth());
+    Value srcU =
+        castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getIn(),
+                                           srcIntTy.getWidth());
+    Value extU = emitCCast(rewriter, loc, uDstTy, srcU);
+    Value result = emitCCast(rewriter, loc, dstTy, extU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithExtSIToEmitC : public OpConversionPattern<arith::ExtSIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::ExtSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto dstIntTy = dyn_cast<IntegerType>(op.getType());
+    auto srcIntTy = dyn_cast<IntegerType>(op.getIn().getType());
+    if (!dstIntTy || !srcIntTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer types");
+
+    Type dstTy = getTypeConverter()->convertType(dstIntTy);
+    if (!dstTy)
+      return failure();
+
+    // i1 sign-extension: 0 -> 0, 1 -> -1.
+    if (srcIntTy.getWidth() == 1) {
+      Value zero = makeEmitCIntConstant(rewriter, loc, dstTy, 0);
+      Value asInt = emitCCast(rewriter, loc, dstTy, adaptor.getIn());
+      Value neg = rewriter.create<emitc::SubOp>(loc, dstTy, zero, asInt).getResult();
+      rewriter.replaceOp(op, neg);
+      return success();
+    }
+
+    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+    return success();
+  }
+};
+
+template <typename CastOp>
+struct ArithCastToEmitC : public OpConversionPattern<CastOp> {
+  using OpConversionPattern<CastOp>::OpConversionPattern;
+  LogicalResult matchAndRewrite(CastOp op, typename CastOp::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type dstTy = this->getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+    return success();
+  }
+};
+
+struct ArithIndexCastUIToEmitC : public OpConversionPattern<arith::IndexCastUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::IndexCastUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    // MemRef casts are handled elsewhere; for safety, fall back to emitc.cast.
+    if (isa<MemRefType>(op.getIn().getType()) || isa<MemRefType>(op.getType())) {
+      rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+      return success();
+    }
+
+    auto getBW = [](Type t) -> std::optional<unsigned> {
+      if (auto i = dyn_cast<IntegerType>(t))
+        return i.getWidth();
+      if (isa<IndexType>(t))
+        return kPTOIndexBitWidth;
+      return std::nullopt;
+    };
+
+    auto srcBW = getBW(op.getIn().getType());
+    auto dstBW = getBW(op.getType());
+    if (!srcBW || !dstBW)
+      return rewriter.notifyMatchFailure(op, "unsupported index_castui types");
+
+    if (*dstBW <= *srcBW) {
+      rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+      return success();
+    }
+
+    auto uSrcTy = getUnsignedIntOpaqueType(rewriter.getContext(), *srcBW);
+    auto uDstTy = getUnsignedIntOpaqueType(rewriter.getContext(), *dstBW);
+    Value srcU = emitCCast(rewriter, loc, uSrcTy, adaptor.getIn());
+    Value extU = emitCCast(rewriter, loc, uDstTy, srcU);
+    Value result = emitCCast(rewriter, loc, dstTy, extU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithUIToFPToEmitC : public OpConversionPattern<arith::UIToFPOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::UIToFPOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto srcIntTy = dyn_cast<IntegerType>(op.getIn().getType());
+    if (!srcIntTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer input");
+
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    // Convert via an unsigned integer type of the same width.
+    if (srcIntTy.getWidth() == 1) {
+      rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+      return success();
+    }
+    auto uSrcTy =
+        getUnsignedIntOpaqueType(rewriter.getContext(), srcIntTy.getWidth());
+    Value srcU =
+        castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getIn(),
+                                           srcIntTy.getWidth());
+    Value fp = rewriter.create<emitc::CastOp>(loc, dstTy, srcU).getResult();
+    rewriter.replaceOp(op, fp);
+    return success();
+  }
+};
+
+struct ArithFPToUIToEmitC : public OpConversionPattern<arith::FPToUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::FPToUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto dstIntTy = dyn_cast<IntegerType>(op.getType());
+    if (!dstIntTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer result");
+
+    Type dstTy = getTypeConverter()->convertType(dstIntTy);
+    if (!dstTy)
+      return failure();
+
+    auto uDstTy =
+        getUnsignedIntOpaqueType(rewriter.getContext(), dstIntTy.getWidth());
+    Value asU = rewriter.create<emitc::CastOp>(loc, uDstTy, adaptor.getIn()).getResult();
+    Value result = emitCCast(rewriter, loc, dstTy, asU);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct ArithBitcastToEmitC : public OpConversionPattern<arith::BitcastOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::BitcastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    // For pointer-like types, a regular cast is fine.
+    if (isa<emitc::PointerType>(dstTy)) {
+      rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
+      return success();
+    }
+
+    // Only support scalar int/float/index bitcasts here.
+    auto srcTy = op.getIn().getType();
+    auto dstOrigTy = op.getType();
+
+    auto getBitWidth = [](Type t) -> std::optional<unsigned> {
+      if (auto it = dyn_cast<IntegerType>(t))
+        return it.getWidth();
+      if (auto ft = dyn_cast<FloatType>(t))
+        return ft.getWidth();
+      if (isa<IndexType>(t))
+        return kPTOIndexBitWidth;
+      return std::nullopt;
+    };
+    auto srcBW = getBitWidth(srcTy);
+    auto dstBW = getBitWidth(dstOrigTy);
+    if (!srcBW || !dstBW || *srcBW != *dstBW)
+      return rewriter.notifyMatchFailure(op, "bitcast requires equal bitwidth");
+
+    // Determine the template argument from the destination type string.
+    auto dstOpaque = dyn_cast<emitc::OpaqueType>(dstTy);
+    if (!dstOpaque)
+      return rewriter.notifyMatchFailure(op, "expected emitc opaque dest type");
+
+    auto templateArgs =
+        rewriter.getArrayAttr({emitc::OpaqueAttr::get(rewriter.getContext(),
+                                                      dstOpaque.getValue())});
+    auto call = rewriter.create<emitc::CallOpaqueOp>(
+        loc, TypeRange{dstTy}, "ptoas_bitcast", /*operands=*/ValueRange{adaptor.getIn()},
+        /*args=*/ArrayAttr{}, /*template_args=*/templateArgs);
+    rewriter.replaceOp(op, call.getResult(0));
+    return success();
+  }
+};
+
+// arith.cmpf lowering with ordered/unordered semantics.
+struct ArithCmpFToEmitC : public OpConversionPattern<arith::CmpFOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  static Value isNaN(ConversionPatternRewriter &rewriter, Location loc,
+                     Value v) {
+    return rewriter
+        .create<emitc::CmpOp>(loc, rewriter.getI1Type(), emitc::CmpPredicate::ne,
+                              v, v)
+        .getResult();
+  }
+
+  static Value isNotNaN(ConversionPatternRewriter &rewriter, Location loc,
+                        Value v) {
+    return rewriter
+        .create<emitc::CmpOp>(loc, rewriter.getI1Type(), emitc::CmpPredicate::eq,
+                              v, v)
+        .getResult();
+  }
+
+  LogicalResult matchAndRewrite(arith::CmpFOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (!isa<FloatType>(op.getLhs().getType()))
+      return rewriter.notifyMatchFailure(op, "cmpf only supported on scalar floats");
+
+    auto loc = op.getLoc();
+    auto i1Ty = rewriter.getI1Type();
+
+    bool unordered = false;
+    emitc::CmpPredicate pred = emitc::CmpPredicate::eq;
+
+    switch (op.getPredicate()) {
+    case arith::CmpFPredicate::AlwaysFalse: {
+      auto cst = makeEmitCOpaqueConstant(rewriter, loc, i1Ty, "false");
+      rewriter.replaceOp(op, cst);
+      return success();
+    }
+    case arith::CmpFPredicate::AlwaysTrue: {
+      auto cst = makeEmitCOpaqueConstant(rewriter, loc, i1Ty, "true");
+      rewriter.replaceOp(op, cst);
+      return success();
+    }
+    case arith::CmpFPredicate::OEQ:
+      unordered = false;
+      pred = emitc::CmpPredicate::eq;
+      break;
+    case arith::CmpFPredicate::OGT:
+      unordered = false;
+      pred = emitc::CmpPredicate::gt;
+      break;
+    case arith::CmpFPredicate::OGE:
+      unordered = false;
+      pred = emitc::CmpPredicate::ge;
+      break;
+    case arith::CmpFPredicate::OLT:
+      unordered = false;
+      pred = emitc::CmpPredicate::lt;
+      break;
+    case arith::CmpFPredicate::OLE:
+      unordered = false;
+      pred = emitc::CmpPredicate::le;
+      break;
+    case arith::CmpFPredicate::ONE:
+      unordered = false;
+      pred = emitc::CmpPredicate::ne;
+      break;
+    case arith::CmpFPredicate::ORD: {
+      Value ordered = rewriter.create<emitc::LogicalAndOp>(
+          loc, i1Ty, isNotNaN(rewriter, loc, adaptor.getLhs()),
+          isNotNaN(rewriter, loc, adaptor.getRhs()));
+      rewriter.replaceOp(op, ordered);
+      return success();
+    }
+    case arith::CmpFPredicate::UEQ:
+      unordered = true;
+      pred = emitc::CmpPredicate::eq;
+      break;
+    case arith::CmpFPredicate::UGT:
+      unordered = true;
+      pred = emitc::CmpPredicate::gt;
+      break;
+    case arith::CmpFPredicate::UGE:
+      unordered = true;
+      pred = emitc::CmpPredicate::ge;
+      break;
+    case arith::CmpFPredicate::ULT:
+      unordered = true;
+      pred = emitc::CmpPredicate::lt;
+      break;
+    case arith::CmpFPredicate::ULE:
+      unordered = true;
+      pred = emitc::CmpPredicate::le;
+      break;
+    case arith::CmpFPredicate::UNE:
+      unordered = true;
+      pred = emitc::CmpPredicate::ne;
+      break;
+    case arith::CmpFPredicate::UNO: {
+      Value unord = rewriter.create<emitc::LogicalOrOp>(
+          loc, i1Ty, isNaN(rewriter, loc, adaptor.getLhs()),
+          isNaN(rewriter, loc, adaptor.getRhs()));
+      rewriter.replaceOp(op, unord);
+      return success();
+    }
+    }
+
+    Value cmp = rewriter
+                    .create<emitc::CmpOp>(loc, i1Ty, pred, adaptor.getLhs(),
+                                          adaptor.getRhs())
+                    .getResult();
+
+    Value unord = rewriter.create<emitc::LogicalOrOp>(
+        loc, i1Ty, isNaN(rewriter, loc, adaptor.getLhs()),
+        isNaN(rewriter, loc, adaptor.getRhs()));
+    Value ord = rewriter.create<emitc::LogicalAndOp>(
+        loc, i1Ty, isNotNaN(rewriter, loc, adaptor.getLhs()),
+        isNotNaN(rewriter, loc, adaptor.getRhs()));
+
+    if (unordered) {
+      Value res =
+          rewriter.create<emitc::LogicalOrOp>(loc, i1Ty, unord, cmp).getResult();
+      rewriter.replaceOp(op, res);
+      return success();
+    }
+
+    Value res =
+        rewriter.create<emitc::LogicalAndOp>(loc, i1Ty, ord, cmp).getResult();
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+struct ArithAddUIExtendedToEmitC
+    : public OpConversionPattern<arith::AddUIExtendedOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arith::AddUIExtendedOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getSum().getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer operands");
+
+    SmallVector<Type> newResultTypes;
+    if (failed(getTypeConverter()->convertTypes(op->getResultTypes(),
+                                                newResultTypes)))
+      return failure();
+    if (newResultTypes.size() != 2)
+      return failure();
+
+    Type sumDstTy = newResultTypes[0];
+    Type overflowDstTy = newResultTypes[1];
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+    auto wideTy =
+        getWiderUnsignedIntOpaqueType(rewriter.getContext(), intTy.getWidth());
+
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    intTy.getWidth());
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    intTy.getWidth());
+    Value lhsWide = emitCCast(rewriter, loc, wideTy, lhsU);
+    Value rhsWide = emitCCast(rewriter, loc, wideTy, rhsU);
+    Value sumWide =
+        rewriter.create<emitc::AddOp>(loc, wideTy, lhsWide, rhsWide).getResult();
+
+    Value sumN = emitCCast(rewriter, loc, uTy, sumWide);
+    Value sum = emitCCast(rewriter, loc, sumDstTy, sumN);
+
+    Value shiftAmt = makeEmitCIntConstant(rewriter, loc, wideTy, intTy.getWidth());
+    Value high = rewriter
+                     .create<emitc::BitwiseRightShiftOp>(loc, wideTy, sumWide,
+                                                         shiftAmt)
+                     .getResult();
+    Value zeroWide = makeEmitCIntConstant(rewriter, loc, wideTy, 0);
+    Value overflow =
+        rewriter
+            .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                  emitc::CmpPredicate::ne, high, zeroWide)
+            .getResult();
+    overflow = emitCCast(rewriter, loc, overflowDstTy, overflow);
+
+    rewriter.replaceOp(op, {sum, overflow});
+    return success();
+  }
+};
+
+template <typename ArithOp, bool isUnsigned>
+struct ArithMulExtendedToEmitC : public OpConversionPattern<ArithOp> {
+  using OpConversionPattern<ArithOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ArithOp op, typename ArithOp::Adaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getResult(0).getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer operands");
+
+    SmallVector<Type> newResultTypes;
+    if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
+                                                      newResultTypes)))
+      return failure();
+    if (newResultTypes.size() != 2)
+      return failure();
+
+    Type lowDstTy = newResultTypes[0];
+    Type highDstTy = newResultTypes[1];
+
+    Type wideTy = isUnsigned ? (Type)getWiderUnsignedIntOpaqueType(rewriter.getContext(),
+                                                                   intTy.getWidth())
+                             : (Type)getWiderSignedIntOpaqueType(rewriter.getContext(),
+                                                                 intTy.getWidth());
+
+    Value lhsWide;
+    Value rhsWide;
+    if constexpr (isUnsigned) {
+      Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                      intTy.getWidth());
+      Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                      intTy.getWidth());
+      lhsWide = emitCCast(rewriter, loc, wideTy, lhsU);
+      rhsWide = emitCCast(rewriter, loc, wideTy, rhsU);
+    } else {
+      lhsWide = emitCCast(rewriter, loc, wideTy, adaptor.getLhs());
+      rhsWide = emitCCast(rewriter, loc, wideTy, adaptor.getRhs());
+    }
+
+    Value prodWide =
+        rewriter.create<emitc::MulOp>(loc, wideTy, lhsWide, rhsWide).getResult();
+    Value low = emitCCast(rewriter, loc, lowDstTy, prodWide);
+
+    Value shiftAmt = makeEmitCIntConstant(rewriter, loc, wideTy, intTy.getWidth());
+    Value highWide = rewriter
+                         .create<emitc::BitwiseRightShiftOp>(loc, wideTy, prodWide,
+                                                             shiftAmt)
+                         .getResult();
+    Value high = emitCCast(rewriter, loc, highDstTy, highWide);
+
+    rewriter.replaceOp(op, {low, high});
+    return success();
+  }
+};
+
+using ArithMulSIExtendedToEmitC =
+    ArithMulExtendedToEmitC<arith::MulSIExtendedOp, /*isUnsigned=*/false>;
+using ArithMulUIExtendedToEmitC =
+    ArithMulExtendedToEmitC<arith::MulUIExtendedOp, /*isUnsigned=*/true>;
+
+struct ArithMinMaxIToEmitCBase {
+  static Value makeSelect(ConversionPatternRewriter &rewriter, Location loc,
+                          Type dstTy, Value cond, Value trueV, Value falseV) {
+    return rewriter
+        .create<emitc::ConditionalOp>(loc, dstTy, cond, trueV, falseV)
+        .getResult();
+  }
+};
+
+struct ArithMaxSIToEmitC : public OpConversionPattern<arith::MaxSIOp>,
+                           ArithMinMaxIToEmitCBase {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::MaxSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+    Value cond = rewriter
+                     .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                           emitc::CmpPredicate::lt,
+                                           adaptor.getLhs(), adaptor.getRhs())
+                     .getResult();
+    Value res = makeSelect(rewriter, loc, dstTy, cond, adaptor.getRhs(),
+                           adaptor.getLhs());
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+struct ArithMinSIToEmitC : public OpConversionPattern<arith::MinSIOp>,
+                           ArithMinMaxIToEmitCBase {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::MinSIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+    Value cond = rewriter
+                     .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                           emitc::CmpPredicate::lt,
+                                           adaptor.getLhs(), adaptor.getRhs())
+                     .getResult();
+    Value res = makeSelect(rewriter, loc, dstTy, cond, adaptor.getLhs(),
+                           adaptor.getRhs());
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+struct ArithMaxUIToEmitC : public OpConversionPattern<arith::MaxUIOp>,
+                           ArithMinMaxIToEmitCBase {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::MaxUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    Value lhsU =
+        castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                           intTy.getWidth());
+    Value rhsU =
+        castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                           intTy.getWidth());
+    Value cond = rewriter
+                     .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                           emitc::CmpPredicate::lt, lhsU, rhsU)
+                     .getResult();
+    Value res = makeSelect(rewriter, loc, dstTy, cond, adaptor.getRhs(),
+                           adaptor.getLhs());
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+struct ArithMinUIToEmitC : public OpConversionPattern<arith::MinUIOp>,
+                           ArithMinMaxIToEmitCBase {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::MinUIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto intTy = dyn_cast<IntegerType>(op.getType());
+    if (!intTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer type");
+    Type dstTy = getTypeConverter()->convertType(intTy);
+    if (!dstTy)
+      return failure();
+
+    Value lhsU =
+        castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                           intTy.getWidth());
+    Value rhsU =
+        castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                           intTy.getWidth());
+    Value cond = rewriter
+                     .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                           emitc::CmpPredicate::lt, lhsU, rhsU)
+                     .getResult();
+    Value res = makeSelect(rewriter, loc, dstTy, cond, adaptor.getLhs(),
+                           adaptor.getRhs());
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+// Floating-point max/min variants.
+struct ArithFloatMinMaxToEmitCBase {
+  static Value isNaN(ConversionPatternRewriter &rewriter, Location loc,
+                     Value v) {
+    return rewriter
+        .create<emitc::CmpOp>(loc, rewriter.getI1Type(), emitc::CmpPredicate::ne,
+                              v, v)
+        .getResult();
+  }
+
+  static Value makeFZero(ConversionPatternRewriter &rewriter, Location loc,
+                         Type ty) {
+    return makeEmitCOpaqueConstant(rewriter, loc, ty, "0.0f");
+  }
+};
+
+struct ArithMaxNumFToEmitC : public OpConversionPattern<arith::MaxNumFOp>,
+                             ArithFloatMinMaxToEmitCBase {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::MaxNumFOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    Value lhsNaN = isNaN(rewriter, loc, adaptor.getLhs());
+    Value rhsNaN = isNaN(rewriter, loc, adaptor.getRhs());
+
+    Value cmpLt = rewriter
+                      .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                            emitc::CmpPredicate::lt,
+                                            adaptor.getLhs(), adaptor.getRhs())
+                      .getResult();
+    Value maxNoNaN =
+        rewriter
+            .create<emitc::ConditionalOp>(loc, dstTy, cmpLt, adaptor.getRhs(),
+                                          adaptor.getLhs())
+            .getResult();
+
+    Value rhsOrMax =
+        rewriter
+            .create<emitc::ConditionalOp>(loc, dstTy, rhsNaN, adaptor.getLhs(),
+                                          maxNoNaN)
+            .getResult();
+    Value res =
+        rewriter
+            .create<emitc::ConditionalOp>(loc, dstTy, lhsNaN, adaptor.getRhs(),
+                                          rhsOrMax)
+            .getResult();
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+struct ArithMinNumFToEmitC : public OpConversionPattern<arith::MinNumFOp>,
+                             ArithFloatMinMaxToEmitCBase {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(arith::MinNumFOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type dstTy = getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    Value lhsNaN = isNaN(rewriter, loc, adaptor.getLhs());
+    Value rhsNaN = isNaN(rewriter, loc, adaptor.getRhs());
+
+    Value cmpLt = rewriter
+                      .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                            emitc::CmpPredicate::lt,
+                                            adaptor.getLhs(), adaptor.getRhs())
+                      .getResult();
+    Value minNoNaN =
+        rewriter
+            .create<emitc::ConditionalOp>(loc, dstTy, cmpLt, adaptor.getLhs(),
+                                          adaptor.getRhs())
+            .getResult();
+
+    Value rhsOrMin =
+        rewriter
+            .create<emitc::ConditionalOp>(loc, dstTy, rhsNaN, adaptor.getLhs(),
+                                          minNoNaN)
+            .getResult();
+    Value res =
+        rewriter
+            .create<emitc::ConditionalOp>(loc, dstTy, lhsNaN, adaptor.getRhs(),
+                                          rhsOrMin)
+            .getResult();
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+template <typename ArithOp, bool isMaximum>
+struct ArithMinMaxFPropagateNaNToEmitC : public OpConversionPattern<ArithOp>,
+                                        ArithFloatMinMaxToEmitCBase {
+  using OpConversionPattern<ArithOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ArithOp op, typename ArithOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<FloatType>(op.getType()))
+      return rewriter.notifyMatchFailure(op, "expected scalar float type");
+
+    auto loc = op.getLoc();
+    Type dstTy = this->getTypeConverter()->convertType(op.getType());
+    if (!dstTy)
+      return failure();
+
+    Value lhsNaN = isNaN(rewriter, loc, adaptor.getLhs());
+    Value rhsNaN = isNaN(rewriter, loc, adaptor.getRhs());
+
+    // Basic compare-based min/max.
+    Value cmpLt = rewriter
+                      .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                            emitc::CmpPredicate::lt,
+                                            adaptor.getLhs(), adaptor.getRhs())
+                      .getResult();
+    Value candidate = rewriter
+                          .create<emitc::ConditionalOp>(
+                              loc, dstTy, cmpLt,
+                              isMaximum ? adaptor.getRhs() : adaptor.getLhs(),
+                              isMaximum ? adaptor.getLhs() : adaptor.getRhs())
+                          .getResult();
+
+    // Fix signed zero tie-breaking for equal zeros.
+    Value zero = makeFZero(rewriter, loc, dstTy);
+    Value eq = rewriter
+                   .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                         emitc::CmpPredicate::eq,
+                                         adaptor.getLhs(), adaptor.getRhs())
+                   .getResult();
+    Value lhsZero = rewriter
+                        .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                              emitc::CmpPredicate::eq,
+                                              adaptor.getLhs(), zero)
+                        .getResult();
+    Value bothZero = rewriter
+                         .create<emitc::LogicalAndOp>(loc, rewriter.getI1Type(),
+                                                      eq, lhsZero)
+                         .getResult();
+
+    auto floatTy = cast<FloatType>(op.getType());
+    auto bitsTy = getUnsignedIntOpaqueType(rewriter.getContext(), floatTy.getWidth());
+    auto templateArgs =
+        rewriter.getArrayAttr({emitc::OpaqueAttr::get(rewriter.getContext(),
+                                                      cast<emitc::OpaqueType>(bitsTy).getValue())});
+    Value lhsBits =
+        rewriter
+            .create<emitc::CallOpaqueOp>(loc, TypeRange{bitsTy}, "ptoas_bitcast",
+                                         ValueRange{adaptor.getLhs()},
+                                         /*args=*/ArrayAttr{},
+                                         /*template_args=*/templateArgs)
+            .getResult(0);
+
+    Value oneBits = makeEmitCIntConstant(rewriter, loc, bitsTy, 1);
+    Value shAmt = makeEmitCIntConstant(rewriter, loc, bitsTy,
+                                       floatTy.getWidth() - 1);
+    Value signMask = rewriter
+                         .create<emitc::BitwiseLeftShiftOp>(loc, bitsTy, oneBits,
+                                                            shAmt)
+                         .getResult();
+    Value signBit = rewriter
+                        .create<emitc::BitwiseAndOp>(loc, bitsTy, lhsBits, signMask)
+                        .getResult();
+    Value zeroBits = makeEmitCIntConstant(rewriter, loc, bitsTy, 0);
+    Value lhsIsNegZero =
+        rewriter
+            .create<emitc::CmpOp>(loc, rewriter.getI1Type(),
+                                  emitc::CmpPredicate::ne, signBit, zeroBits)
+            .getResult();
+
+    Value tie =
+        rewriter
+            .create<emitc::ConditionalOp>(
+                loc, dstTy, lhsIsNegZero,
+                isMaximum ? adaptor.getRhs() : adaptor.getLhs(),
+                isMaximum ? adaptor.getLhs() : adaptor.getRhs())
+            .getResult();
+    Value noNaN = rewriter
+                      .create<emitc::ConditionalOp>(loc, dstTy, bothZero, tie,
+                                                    candidate)
+                      .getResult();
+
+    // Propagate NaN: if lhs is NaN return lhs, else if rhs is NaN return rhs.
+    Value rhsOrNoNaN = rewriter
+                           .create<emitc::ConditionalOp>(loc, dstTy, rhsNaN,
+                                                         adaptor.getRhs(), noNaN)
+                           .getResult();
+    Value res = rewriter
+                    .create<emitc::ConditionalOp>(loc, dstTy, lhsNaN,
+                                                  adaptor.getLhs(), rhsOrNoNaN)
+                    .getResult();
+    rewriter.replaceOp(op, res);
+    return success();
+  }
+};
+
+using ArithMaximumFToEmitC =
+    ArithMinMaxFPropagateNaNToEmitC<arith::MaximumFOp, /*isMaximum=*/true>;
+using ArithMinimumFToEmitC =
+    ArithMinMaxFPropagateNaNToEmitC<arith::MinimumFOp, /*isMaximum=*/false>;
+
+//===----------------------------------------------------------------------===//
+// Arith -> EmitC helpers
+//===----------------------------------------------------------------------===//
+
+static emitc::OpaqueType getSignedIntOpaqueType(MLIRContext *ctx,
+                                                unsigned bitWidth) {
+  switch (bitWidth) {
+  case 1:
+    return emitc::OpaqueType::get(ctx, "int8_t");
+  case 8:
+    return emitc::OpaqueType::get(ctx, "int8_t");
+  case 16:
+    return emitc::OpaqueType::get(ctx, "int16_t");
+  case 32:
+    return emitc::OpaqueType::get(ctx, "int32_t");
+  case 64:
+    return emitc::OpaqueType::get(ctx, "int64_t");
+  case 128:
+    return emitc::OpaqueType::get(ctx, "__int128");
+  default:
+    llvm::errs() << "[Debug] Unsupported signed integer bitwidth: " << bitWidth
+                 << "\n";
+    return emitc::OpaqueType::get(ctx, "int64_t");
+  }
+}
+
+static emitc::OpaqueType getUnsignedIntOpaqueType(MLIRContext *ctx,
+                                                  unsigned bitWidth) {
+  switch (bitWidth) {
+  case 1:
+    return emitc::OpaqueType::get(ctx, "uint8_t");
+  case 8:
+    return emitc::OpaqueType::get(ctx, "uint8_t");
+  case 16:
+    return emitc::OpaqueType::get(ctx, "uint16_t");
+  case 32:
+    return emitc::OpaqueType::get(ctx, "uint32_t");
+  case 64:
+    return emitc::OpaqueType::get(ctx, "uint64_t");
+  case 128:
+    return emitc::OpaqueType::get(ctx, "unsigned __int128");
+  default:
+    llvm::errs() << "[Debug] Unsupported unsigned integer bitwidth: "
+                 << bitWidth << "\n";
+    return emitc::OpaqueType::get(ctx, "uint64_t");
+  }
+}
+
+static emitc::OpaqueType getWiderSignedIntOpaqueType(MLIRContext *ctx,
+                                                     unsigned bitWidth) {
+  switch (bitWidth) {
+  case 1:
+  case 8:
+    return getSignedIntOpaqueType(ctx, 16);
+  case 16:
+    return getSignedIntOpaqueType(ctx, 32);
+  case 32:
+    return getSignedIntOpaqueType(ctx, 64);
+  case 64:
+    return getSignedIntOpaqueType(ctx, 128);
+  default:
+    return getSignedIntOpaqueType(ctx, 128);
+  }
+}
+
+static emitc::OpaqueType getWiderUnsignedIntOpaqueType(MLIRContext *ctx,
+                                                       unsigned bitWidth) {
+  switch (bitWidth) {
+  case 1:
+  case 8:
+    return getUnsignedIntOpaqueType(ctx, 16);
+  case 16:
+    return getUnsignedIntOpaqueType(ctx, 32);
+  case 32:
+    return getUnsignedIntOpaqueType(ctx, 64);
+  case 64:
+    return getUnsignedIntOpaqueType(ctx, 128);
+  default:
+    return getUnsignedIntOpaqueType(ctx, 128);
+  }
+}
+
+static Value makeEmitCOpaqueConstant(ConversionPatternRewriter &rewriter,
+                                     Location loc, Type type,
+                                     llvm::StringRef literal) {
+  auto attr = emitc::OpaqueAttr::get(rewriter.getContext(), literal);
+  return rewriter.create<emitc::ConstantOp>(loc, type, attr);
+}
+
+static Value makeEmitCIntConstant(ConversionPatternRewriter &rewriter,
+                                  Location loc, Type type, int64_t value) {
+  return makeEmitCOpaqueConstant(rewriter, loc, type, std::to_string(value));
+}
+
+static Value emitCCast(ConversionPatternRewriter &rewriter, Location loc,
+                       Type dstType, Value src) {
+  if (src.getType() == dstType)
+    return src;
+  return rewriter.createOrFold<emitc::CastOp>(loc, dstType, src);
+}
+
+// For signless iN integers lowered to signed C++ types, this creates a value
+// representing the same N-bit pattern in an unsigned C++ type of the same
+// width. This avoids incorrect sign-extension when later widening to a larger
+// unsigned type.
+static Value castSignlessIntToUnsignedSameWidth(ConversionPatternRewriter &rewriter,
+                                                Location loc, Value v,
+                                                unsigned bitWidth) {
+  auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), bitWidth);
+  return emitCCast(rewriter, loc, uTy, v);
+}
 
 struct ArithMulIToEmitC : public OpConversionPattern<arith::MulIOp> {
   using OpConversionPattern<arith::MulIOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(arith::MulIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Type newTy = getTypeConverter()->convertType(op.getType());
-    if (!newTy) return failure();
-    rewriter.replaceOpWithNewOp<emitc::MulOp>(op, newTy, adaptor.getLhs(), adaptor.getRhs());
+    auto loc = op.getLoc();
+
+    Type opTy = op.getType();
+    auto intTy = dyn_cast<IntegerType>(opTy);
+    const bool isIndex = isa<IndexType>(opTy);
+    if (!intTy && !isIndex)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer or index type");
+
+    const unsigned bitWidth =
+        intTy ? intTy.getWidth() : static_cast<unsigned>(kPTOIndexBitWidth);
+
+    Type dstTy = getTypeConverter()->convertType(opTy);
+    if (!dstTy)
+      return failure();
+
+    // i1 mul is equivalent to bitwise AND (mod 2 arithmetic).
+    if (bitWidth == 1) {
+      rewriter.replaceOpWithNewOp<emitc::BitwiseAndOp>(op, opTy, adaptor.getLhs(),
+                                                      adaptor.getRhs());
+      return success();
+    }
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), bitWidth);
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    bitWidth);
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    bitWidth);
+    Value mulU = rewriter.create<emitc::MulOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, mulU);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -196,9 +1585,36 @@ struct ArithAddIToEmitC : public OpConversionPattern<arith::AddIOp> {
 
   LogicalResult matchAndRewrite(arith::AddIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Type newTy = getTypeConverter()->convertType(op.getType());
-    if (!newTy) return failure();
-    rewriter.replaceOpWithNewOp<emitc::AddOp>(op, newTy, adaptor.getLhs(), adaptor.getRhs());
+    auto loc = op.getLoc();
+
+    Type opTy = op.getType();
+    auto intTy = dyn_cast<IntegerType>(opTy);
+    const bool isIndex = isa<IndexType>(opTy);
+    if (!intTy && !isIndex)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer or index type");
+
+    const unsigned bitWidth =
+        intTy ? intTy.getWidth() : static_cast<unsigned>(kPTOIndexBitWidth);
+
+    Type dstTy = getTypeConverter()->convertType(opTy);
+    if (!dstTy)
+      return failure();
+
+    // i1 add is equivalent to XOR (mod 2 arithmetic).
+    if (bitWidth == 1) {
+      rewriter.replaceOpWithNewOp<emitc::BitwiseXorOp>(op, opTy, adaptor.getLhs(),
+                                                      adaptor.getRhs());
+      return success();
+    }
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), bitWidth);
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    bitWidth);
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    bitWidth);
+    Value addU = rewriter.create<emitc::AddOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, addU);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -222,11 +1638,36 @@ struct ArithSubIToEmitC : public OpConversionPattern<arith::SubIOp> {
 
   LogicalResult matchAndRewrite(arith::SubIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Type newTy = getTypeConverter()->convertType(op.getType());
-    if (!newTy)
+    auto loc = op.getLoc();
+
+    Type opTy = op.getType();
+    auto intTy = dyn_cast<IntegerType>(opTy);
+    const bool isIndex = isa<IndexType>(opTy);
+    if (!intTy && !isIndex)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer or index type");
+
+    const unsigned bitWidth =
+        intTy ? intTy.getWidth() : static_cast<unsigned>(kPTOIndexBitWidth);
+
+    Type dstTy = getTypeConverter()->convertType(opTy);
+    if (!dstTy)
       return failure();
-    rewriter.replaceOpWithNewOp<emitc::SubOp>(op, newTy, adaptor.getLhs(),
-                                              adaptor.getRhs());
+
+    // i1 sub is equivalent to XOR (mod 2 arithmetic).
+    if (bitWidth == 1) {
+      rewriter.replaceOpWithNewOp<emitc::BitwiseXorOp>(op, opTy, adaptor.getLhs(),
+                                                      adaptor.getRhs());
+      return success();
+    }
+
+    auto uTy = getUnsignedIntOpaqueType(rewriter.getContext(), bitWidth);
+    Value lhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getLhs(),
+                                                    bitWidth);
+    Value rhsU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getRhs(),
+                                                    bitWidth);
+    Value subU = rewriter.create<emitc::SubOp>(loc, uTy, lhsU, rhsU);
+    Value result = emitCCast(rewriter, loc, dstTy, subU);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -264,10 +1705,38 @@ struct ArithTruncIToEmitC : public OpConversionPattern<arith::TruncIOp> {
 
   LogicalResult matchAndRewrite(arith::TruncIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Type newTy = getTypeConverter()->convertType(op.getType());
-    if (!newTy)
+    auto loc = op.getLoc();
+
+    auto dstIntTy = dyn_cast<IntegerType>(op.getType());
+    auto srcIntTy = dyn_cast<IntegerType>(op.getIn().getType());
+    if (!dstIntTy || !srcIntTy)
+      return rewriter.notifyMatchFailure(op, "expected scalar integer types");
+
+    Type dstTy = getTypeConverter()->convertType(dstIntTy);
+    if (!dstTy)
       return failure();
-    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, newTy, adaptor.getIn());
+
+    // to-i1 conversions: Arith wants truncation to the low bit, while C/C++
+    // casts to bool are equivalent to `v != 0`. Implement as `(bool)(v & 1)`.
+    if (dstIntTy.getWidth() == 1) {
+      if (srcIntTy.getWidth() == 1) {
+        rewriter.replaceOp(op, adaptor.getIn());
+        return success();
+      }
+
+      auto uSrcTy =
+          getUnsignedIntOpaqueType(rewriter.getContext(), srcIntTy.getWidth());
+      Value inU = castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getIn(),
+                                                     srcIntTy.getWidth());
+      Value one = makeEmitCIntConstant(rewriter, loc, uSrcTy, 1);
+      Value masked =
+          rewriter.create<emitc::BitwiseAndOp>(loc, uSrcTy, inU, one);
+      Value asBool = emitCCast(rewriter, loc, dstTy, masked);
+      rewriter.replaceOp(op, asBool);
+      return success();
+    }
+
+    rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
     return success();
   }
 };
@@ -295,7 +1764,9 @@ struct ArithTruncIToEmitC : public OpConversionPattern<arith::TruncIOp> {
 		          valStr.find('E') == StringRef::npos) {
 		        valStr.append(".0");
 		      }
-		      valStr.append("f");
+		      // Suffix: keep `f` for f16/f32; omit for f64.
+		      if (!floatAttr.getType().isF64())
+		        valStr.append("f");
 		      auto constAttr = emitc::OpaqueAttr::get(rewriter.getContext(), valStr);
 		      rewriter.replaceOpWithNewOp<emitc::ConstantOp>(op, newType, constAttr);
 		      return success();
@@ -4223,9 +5694,16 @@ public:
   using OpConversionPattern::OpConversionPattern;
   LogicalResult matchAndRewrite(arith::CmpIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+
     // 将 arith.cmpi 转换为 emitc.cmp
     // 映射 Predicate: eq -> equal, slt -> less, etc.
     emitc::CmpPredicate emitcPred;
+    const bool isUnsignedPred =
+        op.getPredicate() == arith::CmpIPredicate::ult ||
+        op.getPredicate() == arith::CmpIPredicate::ule ||
+        op.getPredicate() == arith::CmpIPredicate::ugt ||
+        op.getPredicate() == arith::CmpIPredicate::uge;
     switch (op.getPredicate()) {
       case arith::CmpIPredicate::eq:  emitcPred = emitc::CmpPredicate::eq; break;
       case arith::CmpIPredicate::ne:  emitcPred = emitc::CmpPredicate::ne; break;
@@ -4234,19 +5712,35 @@ public:
       case arith::CmpIPredicate::sgt: emitcPred = emitc::CmpPredicate::gt; break;
       case arith::CmpIPredicate::sge: emitcPred = emitc::CmpPredicate::ge; break;
       // ... 处理无符号比较 (ult, ule 等) ...
-      case arith::CmpIPredicate::ult: emitcPred = emitc::CmpPredicate::lt; break; // EmitC CmpOp 不区分有符号/无符号，依赖操作数类型
+      case arith::CmpIPredicate::ult: emitcPred = emitc::CmpPredicate::lt; break;
       case arith::CmpIPredicate::ule: emitcPred = emitc::CmpPredicate::le; break;
       case arith::CmpIPredicate::ugt: emitcPred = emitc::CmpPredicate::gt; break;
       case arith::CmpIPredicate::uge: emitcPred = emitc::CmpPredicate::ge; break;
       default: return failure();
     }
 
+    Type resTy = getTypeConverter()->convertType(op.getType());
+    if (!resTy)
+      return failure();
+
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    if (isUnsignedPred) {
+      auto intTy = dyn_cast<IntegerType>(op.getLhs().getType());
+      if (!intTy)
+        return rewriter.notifyMatchFailure(op, "expected scalar integer operands");
+      if (intTy.getWidth() != 1) {
+        lhs = castSignlessIntToUnsignedSameWidth(rewriter, loc, lhs, intTy.getWidth());
+        rhs = castSignlessIntToUnsignedSameWidth(rewriter, loc, rhs, intTy.getWidth());
+      }
+    }
+
     rewriter.replaceOpWithNewOp<emitc::CmpOp>(
         op, 
-        /*resultType=*/op.getType(), // i1 -> bool/i1
+        /*resultType=*/resTy, // i1 -> bool/i1
         emitcPred,
-        adaptor.getLhs(), 
-        adaptor.getRhs()
+        lhs,
+        rhs
     );
     return success();
   }
@@ -4351,6 +5845,9 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<FuncToEmitC>(typeConverter, ctx);
   patterns.add<PTOMovToEmitC>(typeConverter, ctx);
   patterns.add<ArithConstantToEmitC>(typeConverter, ctx);
+  patterns.add<ArithAddUIExtendedToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMulSIExtendedToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMulUIExtendedToEmitC>(typeConverter, ctx);
   patterns.add<AffineApplyMulConstToEmitC>(typeConverter, ctx);
   patterns.add<PTONegToEmitC>(typeConverter, ctx);
   patterns.add<PTOCIToEmitC>(typeConverter, ctx);
@@ -4372,8 +5869,52 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<ArithMulIToEmitC>(typeConverter, ctx);
   patterns.add<ArithAddIToEmitC>(typeConverter, ctx);
   patterns.add<ArithSubIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithUnsignedBitwiseBinaryToEmitC<arith::AndIOp, emitc::BitwiseAndOp>>(
+      typeConverter, ctx);
+  patterns.add<ArithUnsignedBitwiseBinaryToEmitC<arith::OrIOp, emitc::BitwiseOrOp>>(
+      typeConverter, ctx);
+  patterns.add<ArithUnsignedBitwiseBinaryToEmitC<arith::XOrIOp, emitc::BitwiseXorOp>>(
+      typeConverter, ctx);
+  patterns.add<ArithShiftLeftToEmitC>(typeConverter, ctx);
+  patterns.add<ArithShiftRightUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithShiftRightSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithDivUIToEmitC>(typeConverter, ctx);
   patterns.add<ArithDivSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithCeilDivUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithCeilDivSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithFloorDivSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithRemUIToEmitC>(typeConverter, ctx);
   patterns.add<ArithRemSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMaxSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMaxUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMinSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMinUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithNegFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithSimpleBinaryToEmitC<arith::AddFOp, emitc::AddOp>>(typeConverter,
+                                                                     ctx);
+  patterns.add<ArithSimpleBinaryToEmitC<arith::SubFOp, emitc::SubOp>>(typeConverter,
+                                                                     ctx);
+  patterns.add<ArithSimpleBinaryToEmitC<arith::MulFOp, emitc::MulOp>>(typeConverter,
+                                                                     ctx);
+  patterns.add<ArithSimpleBinaryToEmitC<arith::DivFOp, emitc::DivOp>>(typeConverter,
+                                                                     ctx);
+  patterns.add<ArithRemFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMaximumFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMinimumFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMaxNumFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithMinNumFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithSelectToEmitC>(typeConverter, ctx);
+  patterns.add<ArithCmpFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithExtUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithExtSIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithCastToEmitC<arith::ExtFOp>>(typeConverter, ctx);
+  patterns.add<ArithCastToEmitC<arith::TruncFOp>>(typeConverter, ctx);
+  patterns.add<ArithUIToFPToEmitC>(typeConverter, ctx);
+  patterns.add<ArithCastToEmitC<arith::SIToFPOp>>(typeConverter, ctx);
+  patterns.add<ArithFPToUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithCastToEmitC<arith::FPToSIOp>>(typeConverter, ctx);
+  patterns.add<ArithIndexCastUIToEmitC>(typeConverter, ctx);
+  patterns.add<ArithBitcastToEmitC>(typeConverter, ctx);
   patterns.add<PTOAddSToTADDS>(typeConverter, ctx);
   patterns.add<PTOColExpandToEmitC>(typeConverter, ctx);
   patterns.add<PTOColMaxToEmitC>(typeConverter, ctx);
@@ -4452,6 +5993,16 @@ struct EmitPTOManualPass
         loc, builder.getStringAttr("pto/pto-inst.hpp"), /*isAngled=*/nullptr);
     builder.create<emitc::VerbatimOp>(
         loc, builder.getStringAttr("using namespace pto;"));
+    builder.create<emitc::VerbatimOp>(
+        loc, builder.getStringAttr(R"cpp(
+template <typename To, typename From>
+static inline To ptoas_bitcast(From from) {
+  static_assert(sizeof(To) == sizeof(From), "ptoas_bitcast: size mismatch");
+  To to;
+  __builtin_memcpy(&to, &from, sizeof(To));
+  return to;
+}
+)cpp"));
 
     // 2. 配置转换目标
     PTOToEmitCTypeConverter typeConverter(ctx);
