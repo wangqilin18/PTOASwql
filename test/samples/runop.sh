@@ -11,7 +11,6 @@ PTOAS_OUT_DIR="${PTOAS_OUT_DIR:-}"
 PTOAS_ENABLE_INSERT_SYNC="${PTOAS_ENABLE_INSERT_SYNC:-1}"
 PTOAS_FLAGS="${PTOAS_FLAGS:-}"
 PTO_PTO_DIRS="${PTO_PTO_DIRS:-InjectSync}"
-PTOAS_PYTHON_EXT_PATH="${PTOAS_PYTHON_EXT_PATH:-}"
 
 usage() {
   cat <<EOF
@@ -26,7 +25,6 @@ Env:
   PTOAS_FLAGS  # extra flags passed to ptoas (e.g. --enable-insert-sync)
   PTOAS_ENABLE_INSERT_SYNC  # 1 to append --enable-insert-sync to PTOAS_FLAGS (default: 1)
   PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: InjectSync)
-  PTOAS_PYTHON_EXT_PATH  # path to PTOAS build/python (optional; for local _pto)
 EOF
   exit 1
 }
@@ -121,31 +119,6 @@ process_one_dir() {
     return 0
   fi
 
-  # Resolve local PTOAS python extension path (for _pto override).
-  local py_ext_path="${PTOAS_PYTHON_EXT_PATH}"
-  if [[ -z "${py_ext_path}" && -n "${ptoas}" ]]; then
-    local build_root
-    build_root="$(cd "$(dirname "$ptoas")/../.." && pwd)"
-    if [[ -d "${build_root}/python/mlir/_mlir_libs" ]]; then
-      py_ext_path="${build_root}/python"
-    fi
-  fi
-  if [[ -z "${py_ext_path}" ]]; then
-    local cand="${BASE_DIR}/../../build/python"
-    if [[ -d "${cand}/mlir/_mlir_libs" ]]; then
-      py_ext_path="${cand}"
-    fi
-  fi
-
-  # PYTHONPATH: ensure sitecustomize + PTOAS python dialects are visible.
-  local py_path="${BASE_DIR}"
-  if [[ -n "${py_ext_path}" ]]; then
-    py_path="${py_ext_path}:${py_path}"
-  fi
-  if [[ -n "${PYTHONPATH:-}" ]]; then
-    py_path="${py_path}:${PYTHONPATH}"
-  fi
-
   # Run every .py file in this directory (no requirement that name matches folder).
   local f mlir cpp base overall=0
   for f in "$dir"/*.py; do
@@ -154,7 +127,7 @@ process_one_dir() {
     mlir="${out_subdir}/${base}-pto-ir.pto"
     cpp="${out_subdir}/${base}-pto.cpp"
 
-    if ! PTOAS_PYTHON_EXT_PATH="${py_ext_path}" PYTHONPATH="${py_path}" "$python" "$f" > "$mlir"; then
+    if ! "$python" "$f" > "$mlir"; then
       echo -e "${A}(${base}.py)\tFAIL\tpython failed: ${base}.py"
       overall=1
       continue
