@@ -4034,10 +4034,10 @@ struct ReinterpretCastToEmitC : public OpConversionPattern<memref::ReinterpretCa
 // pto.taddc lowering -> TADDC(dst, src0, src1, src2)
 //===----------------------------------------------------------------------===//
 
-struct PTOAddCToTADDC : public OpConversionPattern<pto::AddCOp_DPS> {
-  using OpConversionPattern<pto::AddCOp_DPS>::OpConversionPattern;
+struct PTOTAddCToTADDC : public OpConversionPattern<pto::TAddCOp> {
+  using OpConversionPattern<pto::TAddCOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::AddCOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TAddCOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     Value src0 = peelUnrealized(adaptor.getSrc0());
@@ -4112,10 +4112,10 @@ struct PTOAddSCToTADDSC : public OpConversionPattern<pto::AddSCOp_DPS> {
     return success();
   }
 };
-struct PTOAndToEmitC : public OpConversionPattern<pto::AndOp_DPS> {
-  using OpConversionPattern<pto::AndOp_DPS>::OpConversionPattern;
+struct PTOTAndToEmitC : public OpConversionPattern<pto::TAndOp> {
+  using OpConversionPattern<pto::TAndOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::AndOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TAndOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Value a   = peelUnrealized(adaptor.getSrc0());
     Value b   = peelUnrealized(adaptor.getSrc1());
@@ -4150,10 +4150,10 @@ struct PTOAndSToEmitC : public OpConversionPattern<pto::AndSOp_DPS> {
 };
 
 
-struct PTOCIToEmitC : public OpConversionPattern<pto::CIOp_DPS> {
-  using OpConversionPattern<pto::CIOp_DPS>::OpConversionPattern;
+struct PTOTCIToEmitC : public OpConversionPattern<pto::TCIOp> {
+  using OpConversionPattern<pto::TCIOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::CIOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TCIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     auto *ctx = rewriter.getContext();
@@ -6962,7 +6962,7 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<ArithMulUIExtendedToEmitC>(typeConverter, ctx);
   patterns.add<AffineApplyMulConstToEmitC>(typeConverter, ctx);
   patterns.add<PTONegToEmitC>(typeConverter, ctx);
-  patterns.add<PTOCIToEmitC>(typeConverter, ctx);
+  patterns.add<PTOTCIToEmitC>(typeConverter, ctx);
   patterns.add<PTOCmpToEmitC>(typeConverter, ctx);
   patterns.add<PTOCmpSToEmitC>(typeConverter, ctx);
   patterns.add<PTOColSumToEmitC>(typeConverter, ctx);
@@ -7035,7 +7035,7 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOLoadDpsToTLOAD>(typeConverter, ctx);
   patterns.add<PTOStoreDpsToTSTORE>(typeConverter, ctx);
   patterns.add<PTOMScatterToMSCATTER>(typeConverter, ctx);
-  patterns.add<PTOAddCToTADDC>(typeConverter, ctx);
+  patterns.add<PTOTAddCToTADDC>(typeConverter, ctx);
   patterns.add<PTOMinsToEmitC>(typeConverter, ctx);
   patterns.add<PTOAddfDpsToTADD>(typeConverter, ctx);
   patterns.add<PTOMGatherToMGATHER>(typeConverter, ctx);
