@@ -2051,7 +2051,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::LogOp_DPS>(
+        rewriter.replaceOpWithNewOp<pto::TLogOp>(
             op,
             TypeRange{},
             src,
@@ -2078,7 +2078,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::LReluOp_DPS>(
+        rewriter.replaceOpWithNewOp<pto::TLReluOp>(
             op,
             TypeRange{},
             src,
@@ -2106,7 +2106,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::MaxOp_DPS>(
+        rewriter.replaceOpWithNewOp<pto::TMaxOp>(
             op,
             TypeRange{},
             src0,
@@ -2134,7 +2134,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::MaxSOp_DPS>(
+        rewriter.replaceOpWithNewOp<pto::TMaxSOp>(
             op,
             TypeRange{},
             src,
@@ -2162,7 +2162,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::MinOp_DPS>(
+        rewriter.replaceOpWithNewOp<pto::TMinOp>(
             op,
             TypeRange{},
             src0,
