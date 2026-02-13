@@ -5345,10 +5345,10 @@ struct PTOReluToEmitC : public OpConversionPattern<pto::TReluOp> {
 // PTOConvert.cpp  (add lowering + patterns.add for TREM DPS/memref op)
 //===----------------------------------------------------------------------===//
 
-struct PTORemToEmitC : public OpConversionPattern<pto::RemOp_DPS> {
-  using OpConversionPattern<pto::RemOp_DPS>::OpConversionPattern;
+struct PTORemToEmitC : public OpConversionPattern<pto::TRemOp> {
+  using OpConversionPattern<pto::TRemOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::RemOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TRemOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
 
@@ -5370,10 +5370,10 @@ struct PTORemToEmitC : public OpConversionPattern<pto::RemOp_DPS> {
 // PTOConvert.cpp  (add lowering + patterns.add for TREMS DPS/memref op)
 //===----------------------------------------------------------------------===//
 
-struct PTORemSToEmitC : public OpConversionPattern<pto::RemSOp_DPS> {
-  using OpConversionPattern<pto::RemSOp_DPS>::OpConversionPattern;
+struct PTORemSToEmitC : public OpConversionPattern<pto::TRemSOp> {
+  using OpConversionPattern<pto::TRemSOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::RemSOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TRemSOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
 
@@ -5396,10 +5396,10 @@ struct PTORemSToEmitC : public OpConversionPattern<pto::RemSOp_DPS> {
 // PTOConvert.cpp  (add lowering + patterns.add for TRESHAPE DPS/memref op)
 //===----------------------------------------------------------------------===//
 
-struct PTOReshapeToEmitC : public OpConversionPattern<pto::ReshapeOp_DPS> {
-  using OpConversionPattern<pto::ReshapeOp_DPS>::OpConversionPattern;
+struct PTOReshapeToEmitC : public OpConversionPattern<pto::TReshapeOp> {
+  using OpConversionPattern<pto::TReshapeOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::ReshapeOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TReshapeOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
 
@@ -5421,10 +5421,10 @@ struct PTOReshapeToEmitC : public OpConversionPattern<pto::ReshapeOp_DPS> {
 // PTOConvert.cpp  (add lowering + patterns.add for TROWEXPAND DPS/memref op)
 //===----------------------------------------------------------------------===//
 
-struct PTORowExpandToEmitC : public OpConversionPattern<pto::RowExpandOp_DPS> {
-  using OpConversionPattern<pto::RowExpandOp_DPS>::OpConversionPattern;
+struct PTORowExpandToEmitC : public OpConversionPattern<pto::TRowExpandOp> {
+  using OpConversionPattern<pto::TRowExpandOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::RowExpandOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TRowExpandOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
 
@@ -5550,10 +5550,10 @@ struct PTOTMatmulMxBiasToTMATMUL_MX_BIAS
   }
 };
 
-struct PTORowExpandDivToEmitC : public OpConversionPattern<pto::RowExpandDivOp_DPS> {
-  using OpConversionPattern<pto::RowExpandDivOp_DPS>::OpConversionPattern;
+struct PTORowExpandDivToEmitC : public OpConversionPattern<pto::TRowExpandDivOp> {
+  using OpConversionPattern<pto::TRowExpandDivOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::RowExpandDivOp_DPS op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::TRowExpandDivOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
 

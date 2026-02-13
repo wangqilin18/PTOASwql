@@ -1145,118 +1145,6 @@ LogicalResult mlir::pto::TransOp::verify() {
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
-// PTO.cpp  (add verifier for TREM DPS/memref op)
-//===----------------------------------------------------------------------===//
-
-mlir::LogicalResult mlir::pto::RemOp_DPS::verify() {
-  auto src0Ty = mlir::dyn_cast<mlir::MemRefType>(getSrc0().getType());
-  auto src1Ty = mlir::dyn_cast<mlir::MemRefType>(getSrc1().getType());
-  auto dstTy  = mlir::dyn_cast<mlir::MemRefType>(getDst().getType());
-  if (!src0Ty || !src1Ty || !dstTy)
-    return emitOpError() << "expects memref types for src0/src1/dst";
-
-  if (src0Ty.getElementType() != src1Ty.getElementType() ||
-      src0Ty.getElementType() != dstTy.getElementType())
-    return emitOpError() << "expects src0/src1/dst to have the same element type";
-
-  if (src0Ty.getRank() != 2 || src1Ty.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects src0/src1/dst to be rank-2 (tile-shaped memrefs)";
-
-  auto s0 = src0Ty.getShape();
-  auto s1 = src1Ty.getShape();
-  auto d  = dstTy.getShape();
-  for (int i = 0; i < 2; ++i) {
-    if (s0[i] != mlir::ShapedType::kDynamic && d[i] != mlir::ShapedType::kDynamic && s0[i] != d[i])
-      return emitOpError() << "expects src0 shape to match dst shape";
-    if (s1[i] != mlir::ShapedType::kDynamic && d[i] != mlir::ShapedType::kDynamic && s1[i] != d[i])
-      return emitOpError() << "expects src1 shape to match dst shape";
-  }
-
-  return mlir::success();
-}
-//===----------------------------------------------------------------------===//
-// PTO.cpp  (add verifier for TREMS DPS/memref op)
-//===----------------------------------------------------------------------===//
-
-mlir::LogicalResult mlir::pto::RemSOp_DPS::verify() {
-  auto srcTy = mlir::dyn_cast<mlir::MemRefType>(getSrc().getType());
-  auto dstTy = mlir::dyn_cast<mlir::MemRefType>(getDst().getType());
-  if (!srcTy || !dstTy)
-    return emitOpError() << "expects memref types for src/dst";
-
-  if (srcTy.getElementType() != dstTy.getElementType())
-    return emitOpError() << "expects src/dst to have the same element type";
-
-  if (srcTy.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects src/dst to be rank-2 (tile-shaped memrefs)";
-
-  auto s = srcTy.getShape();
-  auto d = dstTy.getShape();
-  for (int i = 0; i < 2; ++i) {
-    if (s[i] != mlir::ShapedType::kDynamic && d[i] != mlir::ShapedType::kDynamic && s[i] != d[i])
-      return emitOpError() << "expects src shape to match dst shape";
-  }
-
-  // Scalar must be float-like; element type can be int/float (runtime behavior target-defined).
-  if (!mlir::isa<mlir::FloatType>(getScalar().getType()))
-    return emitOpError() << "expects scalar to be a float type";
-
-  return mlir::success();
-}
-//===----------------------------------------------------------------------===//
-// PTO.cpp  (add verifier for TRESHAPE DPS/memref op)
-//===----------------------------------------------------------------------===//
-
-mlir::LogicalResult mlir::pto::ReshapeOp_DPS::verify() {
-  auto srcTy = mlir::dyn_cast<mlir::MemRefType>(getSrc().getType());
-  auto dstTy = mlir::dyn_cast<mlir::MemRefType>(getDst().getType());
-  if (!srcTy || !dstTy)
-    return emitOpError() << "expects memref types for src/dst";
-
-  return mlir::success();
-}
-//===----------------------------------------------------------------------===//
-// PTO.cpp  (add verifier for TROWEXPAND DPS/memref op)
-//===----------------------------------------------------------------------===//
-
-mlir::LogicalResult mlir::pto::RowExpandOp_DPS::verify() {
-  auto srcTy = mlir::dyn_cast<mlir::MemRefType>(getSrc().getType());
-  auto dstTy = mlir::dyn_cast<mlir::MemRefType>(getDst().getType());
-  if (!srcTy || !dstTy)
-    return emitOpError() << "expects memref types for src/dst";
-
-  if (srcTy.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects rank-2 memrefs for src/dst";
-
-  if (srcTy.getElementType() != dstTy.getElementType())
-    return emitOpError() << "expects src and dst to have the same element type";
-	
-  return mlir::success();
-}
-//===----------------------------------------------------------------------===//
-// PTO.cpp  (add verifier for TROWEXPANDDIV DPS/memref op)
-//===----------------------------------------------------------------------===//
-
-mlir::LogicalResult mlir::pto::RowExpandDivOp_DPS::verify() {
-  auto src0Ty = mlir::dyn_cast<mlir::MemRefType>(getSrc0().getType());
-  auto src1Ty = mlir::dyn_cast<mlir::MemRefType>(getSrc1().getType());
-  auto dstTy  = mlir::dyn_cast<mlir::MemRefType>(getDst().getType());
-  if (!src0Ty || !src1Ty || !dstTy)
-    return emitOpError() << "expects memref types for src0/src1/dst";
-
-  if (src0Ty.getRank() != 2 || src1Ty.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects rank-2 memrefs for src0/src1/dst";
-
-  auto elemTy = src0Ty.getElementType();
-  if (elemTy != src1Ty.getElementType() || elemTy != dstTy.getElementType())
-    return emitOpError() << "expects src0/src1/dst to have the same element type";
-
-  if (!elemTy.isF16() && !elemTy.isF32())
-    return emitOpError() << "expects element type to be f16 or f32";
-
-  return mlir::success();
-}
-//===----------------------------------------------------------------------===//
 // PTO.cpp  (add verifier for TROWEXPANDMUL DPS/memref op)
 //===----------------------------------------------------------------------===//
 
@@ -3555,29 +3443,19 @@ mlir::LogicalResult mlir::pto::TReluOp::verify() {
 //===----------------------------------------------------------------------===//
 
 mlir::LogicalResult mlir::pto::TRemOp::verify() {
-  auto src0Ty = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc0().getType());
-  auto src1Ty = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc1().getType());
-  auto dstTy  = mlir::dyn_cast<mlir::pto::TileBufType>(getDst().getType());
-  if (!src0Ty || !src1Ty || !dstTy)
-    return emitOpError() << "expects tilebuf types for src0/src1/dst";
-
-  if (src0Ty.getElementType() != src1Ty.getElementType() ||
-      src0Ty.getElementType() != dstTy.getElementType())
-    return emitOpError() << "expects src0/src1/dst to have the same element type";
-
-  if (src0Ty.getRank() != 2 || src1Ty.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects src0/src1/dst to be rank-2 (tile-shaped tilebufs)";
-
-  auto s0 = src0Ty.getShape();
-  auto s1 = src1Ty.getShape();
-  auto d  = dstTy.getShape();
-  for (int i = 0; i < 2; ++i) {
-    if (s0[i] != mlir::ShapedType::kDynamic && d[i] != mlir::ShapedType::kDynamic && s0[i] != d[i])
-      return emitOpError() << "expects src0 shape to match dst shape";
-    if (s1[i] != mlir::ShapedType::kDynamic && d[i] != mlir::ShapedType::kDynamic && s1[i] != d[i])
-      return emitOpError() << "expects src1 shape to match dst shape";
-  }
-
+  Type t0 = getSrc0().getType();
+  Type t1 = getSrc1().getType();
+  Type td = getDst().getType();
+  if (!isPTOShapedLike(t0) || !isPTOShapedLike(t1) || !isPTOShapedLike(td))
+    return emitOpError("expects src0/src1/dst to be memref/tensor/tile_buf/tile_view types");
+  Type e0 = getElemTy(t0), e1 = getElemTy(t1), ed = getElemTy(td);
+  if (!e0 || !e1 || !ed)
+    return emitOpError("failed to get element type for operands");
+  if (e0 != e1 || e0 != ed)
+    return emitOpError("expects src0/src1/dst to have the same element type");
+  auto s0 = getShapeVec(t0), s1 = getShapeVec(t1), sd = getShapeVec(td);
+  if (s0 != s1 || s0 != sd)
+    return emitOpError("expects src0/src1/dst to have the same shape");
   return mlir::success();
 }
 //===----------------------------------------------------------------------===//
@@ -3585,28 +3463,19 @@ mlir::LogicalResult mlir::pto::TRemOp::verify() {
 //===----------------------------------------------------------------------===//
 
 mlir::LogicalResult mlir::pto::TRemSOp::verify() {
-  auto srcTy = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc().getType());
-  auto dstTy = mlir::dyn_cast<mlir::pto::TileBufType>(getDst().getType());
-  if (!srcTy || !dstTy)
-    return emitOpError() << "expects tilebuf types for src/dst";
-
-  if (srcTy.getElementType() != dstTy.getElementType())
-    return emitOpError() << "expects src/dst to have the same element type";
-
-  if (srcTy.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects src/dst to be rank-2 (tile-shaped tilebufs)";
-
-  auto s = srcTy.getShape();
-  auto d = dstTy.getShape();
-  for (int i = 0; i < 2; ++i) {
-    if (s[i] != mlir::ShapedType::kDynamic && d[i] != mlir::ShapedType::kDynamic && s[i] != d[i])
-      return emitOpError() << "expects src shape to match dst shape";
-  }
-
-  // Scalar must be float-like; element type can be int/float (runtime behavior target-defined).
+  Type ts = getSrc().getType();
+  Type td = getDst().getType();
+  if (!isPTOShapedLike(ts) || !isPTOShapedLike(td))
+    return emitOpError("expects src/dst to be memref/tensor/tile_buf/tile_view types");
+  Type es = getElemTy(ts), ed = getElemTy(td);
+  if (!es || !ed)
+    return emitOpError("failed to get element type for operands");
+  if (es != ed)
+    return emitOpError("expects src/dst to have the same element type");
+  if (getShapeVec(ts) != getShapeVec(td))
+    return emitOpError("expects src/dst to have the same shape");
   if (!mlir::isa<mlir::FloatType>(getScalar().getType()))
-    return emitOpError() << "expects scalar to be a float type";
-
+    return emitOpError("expects scalar to be a float type");
   return mlir::success();
 }
 //===----------------------------------------------------------------------===//
@@ -3614,11 +3483,10 @@ mlir::LogicalResult mlir::pto::TRemSOp::verify() {
 //===----------------------------------------------------------------------===//
 
 mlir::LogicalResult mlir::pto::TReshapeOp::verify() {
-  auto srcTy = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc().getType());
-  auto dstTy = mlir::dyn_cast<mlir::pto::TileBufType>(getDst().getType());
-  if (!srcTy || !dstTy)
-    return emitOpError() << "expects tilebuf types for src/dst";
-
+  Type ts = getSrc().getType();
+  Type td = getDst().getType();
+  if (!isPTOShapedLike(ts) || !isPTOShapedLike(td))
+    return emitOpError("expects src/dst to be memref/tensor/tile_buf/tile_view types");
   return mlir::success();
 }
 //===----------------------------------------------------------------------===//
@@ -3626,17 +3494,15 @@ mlir::LogicalResult mlir::pto::TReshapeOp::verify() {
 //===----------------------------------------------------------------------===//
 
 mlir::LogicalResult mlir::pto::TRowExpandOp::verify() {
-  auto srcTy = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc().getType());
-  auto dstTy = mlir::dyn_cast<mlir::pto::TileBufType>(getDst().getType());
-  if (!srcTy || !dstTy)
-    return emitOpError() << "expects tilebuf types for src/dst";
-
-  if (srcTy.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects rank-2 tilebufs for src/dst";
-
-  if (srcTy.getElementType() != dstTy.getElementType())
-    return emitOpError() << "expects src and dst to have the same element type";
-
+  Type ts = getSrc().getType();
+  Type td = getDst().getType();
+  if (!isPTOShapedLike(ts) || !isPTOShapedLike(td))
+    return emitOpError("expects src/dst to be memref/tensor/tile_buf/tile_view types");
+  Type es = getElemTy(ts), ed = getElemTy(td);
+  if (!es || !ed)
+    return emitOpError("failed to get element type for operands");
+  if (es != ed)
+    return emitOpError("expects src/dst to have the same element type");
   return mlir::success();
 }
 //===----------------------------------------------------------------------===//
@@ -3644,22 +3510,19 @@ mlir::LogicalResult mlir::pto::TRowExpandOp::verify() {
 //===----------------------------------------------------------------------===//
 
 mlir::LogicalResult mlir::pto::TRowExpandDivOp::verify() {
-  auto src0Ty = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc0().getType());
-  auto src1Ty = mlir::dyn_cast<mlir::pto::TileBufType>(getSrc1().getType());
-  auto dstTy  = mlir::dyn_cast<mlir::pto::TileBufType>(getDst().getType());
-  if (!src0Ty || !src1Ty || !dstTy)
-    return emitOpError() << "expects tile buf types for src0/src1/dst";
-
-  if (src0Ty.getRank() != 2 || src1Ty.getRank() != 2 || dstTy.getRank() != 2)
-    return emitOpError() << "expects rank-2 tilebufs for src0/src1/dst";
-
-  auto elemTy = src0Ty.getElementType();
-  if (elemTy != src1Ty.getElementType() || elemTy != dstTy.getElementType())
-    return emitOpError() << "expects src0/src1/dst to have the same element type";
-
-  if (!elemTy.isF16() && !elemTy.isF32())
-    return emitOpError() << "expects element type to be f16 or f32";
-
+  Type t0 = getSrc0().getType();
+  Type t1 = getSrc1().getType();
+  Type td = getDst().getType();
+  if (!isPTOShapedLike(t0) || !isPTOShapedLike(t1) || !isPTOShapedLike(td))
+    return emitOpError("expects src0/src1/dst to be memref/tensor/tile_buf/tile_view types");
+  Type e0 = getElemTy(t0), e1 = getElemTy(t1), ed = getElemTy(td);
+  if (!e0 || !e1 || !ed)
+    return emitOpError("failed to get element type for operands");
+  if (e0 != e1 || e0 != ed)
+    return emitOpError("expects src0/src1/dst to have the same element type");
+  auto elemTy = e0.dyn_cast<mlir::FloatType>();
+  if (!elemTy || (!elemTy.isF16() && !elemTy.isF32()))
+    return emitOpError("expects element type to be f16 or f32");
   return mlir::success();
 }
 //===----------------------------------------------------------------------===//
@@ -5317,18 +5180,6 @@ void StoreScalarOp::getEffects(
 }
 
 
-PTO_DEFINE_BINARY_EFFECTS(RemOp_DPS, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
-
-void RemSOp_DPS::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
-  PTO_ADD_READ(getSrcMutable());
-  PTO_ADD_READ(getScalarMutable());
-  PTO_ADD_WRITE(getDstMutable());
-}
-
-PTO_DEFINE_UNARY_EFFECTS(ReshapeOp_DPS, getSrcMutable(), getDstMutable())
-PTO_DEFINE_UNARY_EFFECTS(RowExpandOp_DPS, getSrcMutable(), getDstMutable())
-PTO_DEFINE_BINARY_EFFECTS(RowExpandDivOp_DPS, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
 PTO_DEFINE_BINARY_EFFECTS(RowExpandMulOp_DPS, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
 PTO_DEFINE_BINARY_EFFECTS(RowExpandSubOp_DPS, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
 
