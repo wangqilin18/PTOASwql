@@ -6675,6 +6675,20 @@ static bool getConstIndex(Value v, int64_t &out) {
     out = cInt.value();
     return true;
   }
+  if (auto cOp = v.getDefiningOp<arith::ConstantOp>()) {
+    if (auto ia = dyn_cast<IntegerAttr>(cOp.getValue())) {
+      out = ia.getInt();
+      return true;
+    }
+  }
+  if (auto castOp = v.getDefiningOp<arith::IndexCastOp>())
+    return getConstIndex(castOp.getIn(), out);
+  if (auto extOp = v.getDefiningOp<arith::ExtSIOp>())
+    return getConstIndex(extOp.getIn(), out);
+  if (auto extOp = v.getDefiningOp<arith::ExtUIOp>())
+    return getConstIndex(extOp.getIn(), out);
+  if (auto truncOp = v.getDefiningOp<arith::TruncIOp>())
+    return getConstIndex(truncOp.getIn(), out);
   return false;
 }
 
@@ -6774,7 +6788,8 @@ mlir::LogicalResult mlir::pto::SubsetOp::verify() {
   if (!boxed)
     return success();
 
-  // Boxed layout: require static 2D sizes/offsets with inner alignment.
+  // Boxed layout: require static 2D sizes with inner alignment. Offsets may be
+  // dynamic, but static offsets must be aligned.
   auto sizesAttr = getSizes();
   if (!sizesAttr || sizesAttr.size() != 2)
     return emitOpError("boxed layout subset expects 2D sizes");
@@ -6791,26 +6806,36 @@ mlir::LogicalResult mlir::pto::SubsetOp::verify() {
     return emitOpError("boxed layout subset expects 2D offsets");
 
   int64_t offR = 0, offC = 0;
-  if (!getConstIndex(getOffsets()[0], offR) ||
-      !getConstIndex(getOffsets()[1], offC))
-    return emitOpError("boxed layout subset requires static aligned offsets");
+  bool offRConst = getConstIndex(getOffsets()[0], offR);
+  bool offCConst = getConstIndex(getOffsets()[1], offC);
 
-  if (offR < 0 || offC < 0)
-    return emitOpError("subset offsets must be non-negative");
-
-  if (offR % innerRows != 0 || offC % innerCols != 0)
-    return emitOpError("boxed layout subset offsets must be multiples of inner shape");
+  if (offRConst) {
+    if (offR < 0)
+      return emitOpError("subset offsets must be non-negative");
+    if (offR % innerRows != 0)
+      return emitOpError("boxed layout subset offsets must be multiples of inner shape");
+  }
+  if (offCConst) {
+    if (offC < 0)
+      return emitOpError("subset offsets must be non-negative");
+    if (offC % innerCols != 0)
+      return emitOpError("boxed layout subset offsets must be multiples of inner shape");
+  }
 
   auto srcShape = srcTy.getShape();
   if (srcShape.size() == 2 &&
       srcShape[0] != ShapedType::kDynamic &&
       srcShape[1] != ShapedType::kDynamic) {
     if (bl == 0) {
-      if (sizeC != srcShape[1] || offC != 0)
-        return emitOpError("boxed RowMajor subset must keep full cols (col offset = 0)");
+      if (sizeC != srcShape[1])
+        return emitOpError("boxed RowMajor subset must keep full cols");
+      if (!offCConst || offC != 0)
+        return emitOpError("boxed RowMajor subset requires static col offset = 0");
     } else if (bl == 1) {
-      if (sizeR != srcShape[0] || offR != 0)
-        return emitOpError("boxed ColMajor subset must keep full rows (row offset = 0)");
+      if (sizeR != srcShape[0])
+        return emitOpError("boxed ColMajor subset must keep full rows");
+      if (!offRConst || offR != 0)
+        return emitOpError("boxed ColMajor subset requires static row offset = 0");
     }
   } else {
     return emitOpError("boxed layout subset requires static source shape");

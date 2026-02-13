@@ -109,6 +109,32 @@ static bool readSLayoutI32(Attribute attr, int32_t &out) {
   return false;
 }
 
+static bool getConstIndexValue(Value v, int64_t &out) {
+  if (auto cOp = v.getDefiningOp<arith::ConstantIndexOp>()) {
+    out = cOp.value();
+    return true;
+  }
+  if (auto cInt = v.getDefiningOp<arith::ConstantIntOp>()) {
+    out = cInt.value();
+    return true;
+  }
+  if (auto cOp = v.getDefiningOp<arith::ConstantOp>()) {
+    if (auto ia = dyn_cast<IntegerAttr>(cOp.getValue())) {
+      out = ia.getInt();
+      return true;
+    }
+  }
+  if (auto castOp = v.getDefiningOp<arith::IndexCastOp>())
+    return getConstIndexValue(castOp.getIn(), out);
+  if (auto extOp = v.getDefiningOp<arith::ExtSIOp>())
+    return getConstIndexValue(extOp.getIn(), out);
+  if (auto extOp = v.getDefiningOp<arith::ExtUIOp>())
+    return getConstIndexValue(extOp.getIn(), out);
+  if (auto truncOp = v.getDefiningOp<arith::TruncIOp>())
+    return getConstIndexValue(truncOp.getIn(), out);
+  return false;
+}
+
 static bool computeTileLayoutInfo(mlir::pto::TileBufConfigAttr cfg, Type elemTy,
                                   ArrayRef<int64_t> shape,
                                   TileLayoutInfo &info) {
@@ -726,29 +752,20 @@ struct PTOViewToMemrefPass
             return;
           }
 
-          auto getConstOffset = [](Value v, int64_t &out) -> bool {
-            if (auto cOp = v.getDefiningOp<arith::ConstantIndexOp>()) {
-              out = cOp.value();
-              return true;
-            }
-            if (auto cInt = v.getDefiningOp<arith::ConstantIntOp>()) {
-              out = cInt.value();
-              return true;
-            }
-            return false;
-          };
-
           int64_t off0 = 0, off1 = 0;
-          if (!getConstOffset(op.getOffsets()[0], off0) ||
-              !getConstOffset(op.getOffsets()[1], off1)) {
-            op.emitError("boxed layout subset requires static aligned offsets");
-            signalPassFailure();
-            return;
+          bool off0Const = getConstIndexValue(op.getOffsets()[0], off0);
+          bool off1Const = getConstIndexValue(op.getOffsets()[1], off1);
+          if (off0Const) {
+            if (!checkMul(off0, layoutInfo.innerRows, "row offset")) {
+              signalPassFailure();
+              return;
+            }
           }
-          if (!checkMul(off0, layoutInfo.innerRows, "row offset") ||
-              !checkMul(off1, layoutInfo.innerCols, "col offset")) {
-            signalPassFailure();
-            return;
+          if (off1Const) {
+            if (!checkMul(off1, layoutInfo.innerCols, "col offset")) {
+              signalPassFailure();
+              return;
+            }
           }
 
           int32_t bl = 0;
@@ -762,8 +779,8 @@ struct PTOViewToMemrefPass
                 signalPassFailure();
                 return;
               }
-              if (off1 != 0) {
-                op.emitError("boxed RowMajor subset requires col offset = 0");
+              if (!off1Const || off1 != 0) {
+                op.emitError("boxed RowMajor subset requires static col offset = 0");
                 signalPassFailure();
                 return;
               }
@@ -773,8 +790,8 @@ struct PTOViewToMemrefPass
                 signalPassFailure();
                 return;
               }
-              if (off0 != 0) {
-                op.emitError("boxed ColMajor subset requires row offset = 0");
+              if (!off0Const || off0 != 0) {
+                op.emitError("boxed ColMajor subset requires static row offset = 0");
                 signalPassFailure();
                 return;
               }
