@@ -23,23 +23,25 @@ def build_pingpong():
             bl = pto.BLayoutAttr.get(pto.BLayout.RowMajor, ctx)
             sl = pto.SLayoutAttr.get(pto.SLayout.NoneBox, ctx)
             pd = pto.PadValueAttr.get(pto.PadValue.Null, ctx)
-            cfg = pto.TileBufConfigAttr.get(bl, sl, 512, pd, ctx)
+            fractal_ab_size = pto.TileConfig.fractalABSize
+            cfg = pto.TileBufConfigAttr.get(bl, sl, fractal_ab_size, pd, ctx)
             ws_type = pto.TileBufType.get([32, 64], f32, vec, [32, 32], cfg, ctx)
 
             # ======================================================
             # 2. 逻辑主体
             # ======================================================
-            fn_ty = func.FunctionType.get([ptr_f32, ptr_f32, ws_type], [])
+            fn_ty = func.FunctionType.get([ptr_f32, ptr_f32], [])
             
             with InsertionPoint(m.body):
                 fn = func.FuncOp("test_double_buffer_step", fn_ty)
                 entry = fn.add_entry_block()
                 
             with InsertionPoint(entry):
-                gm_src, gm_dst, workspace = entry.arguments
+                gm_src, gm_dst = entry.arguments
                 c0 = arith.ConstantOp(idx, 0).result
                 c1 = arith.ConstantOp(idx, 1).result
                 c32 = arith.ConstantOp(idx, 32).result
+                workspace = pto.AllocTileOp(ws_type).result
 
                 # Wrap GM memrefs as tensor_view and create full partitions
                 tv_src = pto.MakeTensorViewOp(pto.TensorViewType.get(2, f32, ctx),
@@ -58,8 +60,8 @@ def build_pingpong():
                 pong = pto.SubsetOp(workspace, [c0, c32], sizes=[32, 32]).result
 
                 # DPS: Compute, Prefetch, WriteBack
-                pto.TAddOp(ping, ping, ping)
                 pto.TLoadOp(None, sv_src, pong)
+                pto.TAddOp(pong, pong, ping)
                 pto.TStoreOp(None, ping, sv_dst)
                 
                 func.ReturnOp([])

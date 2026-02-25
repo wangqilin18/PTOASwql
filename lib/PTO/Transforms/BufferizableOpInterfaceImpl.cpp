@@ -164,7 +164,7 @@ static LogicalResult bufferizeDestinationStyleOpInterface(
 
 struct PTOLoadOpInterface
     : public DstBufferizableOpInterfaceExternalModel<PTOLoadOpInterface,
-                                                     pto::LoadDpsOp> {
+                                                     pto::TLoadOp> {
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const BufferizationOptions &options) const {
     return bufferizeDestinationStyleOpInterface(
@@ -174,7 +174,7 @@ struct PTOLoadOpInterface
 
 struct PTOStoreOpInterface
     : public DstBufferizableOpInterfaceExternalModel<PTOStoreOpInterface,
-                                                     pto::StoreDpsOp> {
+                                                     pto::TStoreOp> {
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const BufferizationOptions &options) const {
     auto dpsOp = cast<DestinationStyleOpInterface>(op);
@@ -213,6 +213,19 @@ struct PTOStoreOpInterface
   }
 };
 
+/// TMrgSortOp format2 has dsts = [memref, vector<4xi16>]. The vector init
+/// must not participate in bufferization (not a tensor/memref).
+struct PTOMrgSortDpsOpInterface
+    : public DstBufferizableOpInterfaceExternalModel<PTOMrgSortDpsOpInterface,
+                                                     pto::TMrgSortOp> {
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                         const BufferizationOptions &options) const {
+    return bufferizeDestinationStyleOpInterface(
+        rewriter, cast<DestinationStyleOpInterface>(op), options,
+        /*supportMixedTensorBufferMode=*/true);
+  }
+};
+
 struct PTOAddFOpInterface
     : public DstBufferizableOpInterfaceExternalModel<PTOAddFOpInterface,
                                                      pto::AddFDpsOp> {
@@ -248,7 +261,7 @@ struct PTOAddFOpInterface
 
 struct PTOMatmulOpInterface
     : public DstBufferizableOpInterfaceExternalModel<PTOMatmulOpInterface,
-                                                     pto::MatmulDpsOp> {
+                                                     pto::TMatmulOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const AnalysisState &state) const {
     auto dpsOp = cast<DestinationStyleOpInterface>(op);
@@ -644,10 +657,11 @@ void mlir::pto::registerBufferizableOpInterfaceExternalModels(
     // ND2NZOp::attachInterface<NDNZConversionOpInterface<ND2NZOp>>(*ctx);
     // NZ2NDOp::attachInterface<NDNZConversionOpInterface<NZ2NDOp>>(*ctx);
     // CopyOp::attachInterface<PTOCopyOpInterface>(*ctx);
-    LoadDpsOp::attachInterface<PTOLoadOpInterface>(*ctx);
-    StoreDpsOp::attachInterface<PTOStoreOpInterface>(*ctx);
+    TLoadOp::attachInterface<PTOLoadOpInterface>(*ctx);
+    TStoreOp::attachInterface<PTOStoreOpInterface>(*ctx);
+    TMrgSortOp::attachInterface<PTOMrgSortDpsOpInterface>(*ctx);
     AddFDpsOp::attachInterface<PTOAddFOpInterface>(*ctx);
-    MatmulDpsOp::attachInterface<PTOMatmulOpInterface>(*ctx);
+    TMatmulOp::attachInterface<PTOMatmulOpInterface>(*ctx);
     // MixMatmulOp::attachInterface<PTOMixMatmulOpInterface>(*ctx);
     // MixGroupMatmulOp::attachInterface<PTOMixGroupMatmulOpInterface>(*ctx);
     // PrintOp::attachInterface<PrintOpInterface>(*ctx);

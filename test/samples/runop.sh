@@ -8,6 +8,7 @@ BASE_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 PTOAS_BIN="${PTOAS_BIN:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 PTOAS_OUT_DIR="${PTOAS_OUT_DIR:-}"
+PTOAS_ENABLE_INSERT_SYNC="${PTOAS_ENABLE_INSERT_SYNC:-1}"
 PTOAS_FLAGS="${PTOAS_FLAGS:-}"
 PTO_PTO_DIRS="${PTO_PTO_DIRS:-InjectSync}"
 
@@ -22,6 +23,7 @@ Env:
   PYTHON_BIN  # python executable to run samples (optional)
   PTOAS_OUT_DIR  # where generated *.mlir/*.cpp go (optional; defaults to a temp dir)
   PTOAS_FLAGS  # extra flags passed to ptoas (e.g. --enable-insert-sync)
+  PTOAS_ENABLE_INSERT_SYNC  # 1 to append --enable-insert-sync to PTOAS_FLAGS (default: 1)
   PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: InjectSync)
 EOF
   exit 1
@@ -91,6 +93,22 @@ process_one_dir() {
     # shellcheck disable=SC2206
     ptoas_flags=(${PTOAS_FLAGS})
   fi
+  if [[ "${PTOAS_ENABLE_INSERT_SYNC}" == "1" ]]; then
+    local has_insync=0
+    if ((${#ptoas_flags[@]})); then
+      for f in "${ptoas_flags[@]}"; do
+        if [[ "$f" == "--enable-insert-sync" ]]; then
+          has_insync=1
+          break
+        fi
+      done
+    fi
+    [[ $has_insync -eq 1 ]] || ptoas_flags+=(--enable-insert-sync)
+  fi
+  local -a ptoas_cmd_base=("$ptoas")
+  if (( ${#ptoas_flags[@]} )); then
+    ptoas_cmd_base+=("${ptoas_flags[@]}")
+  fi
 
   if [[ -z "$ptoas" || ! -x "$ptoas" ]]; then
     echo -e "${A}\tFAIL\tMissing executable: PTOAS_BIN (searched common paths)"
@@ -110,20 +128,61 @@ process_one_dir() {
   for f in "$dir"/*.py; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f" .py)"
+    local expect_fail=0
+    case "$base" in
+      *_invalid|*_xfail) expect_fail=1 ;;
+    esac
     mlir="${out_subdir}/${base}-pto-ir.pto"
     cpp="${out_subdir}/${base}-pto.cpp"
 
     if ! "$python" "$f" > "$mlir"; then
+      if [[ $expect_fail -eq 1 ]]; then
+        echo -e "${A}(${base}.py)\tXFAIL\tpython failed as expected"
+        continue
+      fi
       echo -e "${A}(${base}.py)\tFAIL\tpython failed: ${base}.py"
       overall=1
       continue
     fi
 
     # Write output via -o to avoid mixing debug prints with generated C++.
-    if ! "$ptoas" "${ptoas_flags[@]}" "$mlir" -o "$cpp" >/dev/null 2>&1; then
+    local -a ptoas_cmd=("${ptoas_cmd_base[@]}" "$mlir" -o "$cpp")
+    if ! "${ptoas_cmd[@]}" >/dev/null 2>&1; then
+      if [[ $expect_fail -eq 1 ]]; then
+        echo -e "${A}(${base}.py)\tXFAIL\tptoas failed as expected"
+        continue
+      fi
       echo -e "${A}(${base}.py)\tFAIL\tptoas failed: $(basename "$mlir")"
       overall=1
       continue
+    fi
+
+    if [[ $expect_fail -eq 1 ]]; then
+      echo -e "${A}(${base}.py)\tFAIL\texpected failure but succeeded"
+      overall=1
+      continue
+    fi
+
+    # Regression guard: SubsetOp valid-shape inference must not produce 0.
+    # This breaks downstream NPU compilation (e.g. vadd_pto_pingpong workspace ping/pong).
+    if [[ "$base" == "vadd_pto_pingpong" ]]; then
+      if grep -Fq ", 0, SLayout" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tgenerated tile has valid dim 0 (subset valid-shape bug)"
+        overall=1
+        continue
+      fi
+    fi
+
+    # Regression guard for Issue #112:
+    # `--enable-insert-sync` must not push PIPE_M -> PIPE_FIX into high event IDs
+    # for the autosync tmatmulk sample, otherwise it may deadlock on Ascend NPU.
+    if [[ "$base" == "tmatmulk_autosync" ]]; then
+      if grep -Eq "set_flag\\(PIPE_M,[[:space:]]*PIPE_FIX,[[:space:]]*EVENT_ID[3-7]\\)" "$cpp" || \
+         grep -Eq "wait_flag\\(PIPE_M,[[:space:]]*PIPE_FIX,[[:space:]]*EVENT_ID[3-7]\\)" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tdeadlock signature: PIPE_M->PIPE_FIX uses EVENT_ID[3-7]"
+        overall=1
+        continue
+      fi
     fi
 
     echo -e "${A}(${base}.py)\tOK\tgenerated: $(basename "$cpp")"
@@ -147,10 +206,22 @@ process_one_dir() {
       base="$(basename "$f" .pto)"
       cpp="${out_subdir}/${base}.cpp"
 
-      if ! "$ptoas" "${ptoas_flags[@]}" "$f" -o "$cpp" >/dev/null 2>&1; then
+      local -a ptoas_cmd=("${ptoas_cmd_base[@]}" "$f" -o "$cpp")
+      if ! "${ptoas_cmd[@]}" >/dev/null 2>&1; then
         echo -e "${A}(${base}.pto)\tFAIL\tptoas failed: $(basename "$f")"
         overall=1
         continue
+      fi
+
+      # Regression guard: dynamic valid_shape must be preserved through lowering.
+      # If `valid_col` is dynamic, PTOToEmitC must construct the Tile with a
+      # runtime argument (i.e. emit `= Tile<...>(...)` instead of `Tile<...>;`).
+      if [[ "$base" == "test_dynamic_valid_shape" ]]; then
+        if ! grep -Fq "= Tile<TileType::Vec, float" "$cpp"; then
+          echo -e "${A}(${base}.pto)\tFAIL\tmissing dynamic Tile constructor (valid_col likely dropped)"
+          overall=1
+          continue
+        fi
       fi
 
       echo -e "${A}(${base}.pto)\tOK\tgenerated: $(basename "$cpp")"

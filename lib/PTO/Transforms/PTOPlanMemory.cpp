@@ -133,8 +133,17 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
     } else if (auto printDpsOp = dyn_cast<pto::PrintOp_DPS>(op)) {
       // PrintOp_DPS only reads from buffer, similar to LoadOp
       OpKillHandle(curOpInfo, live, op->getBlock());
+    } else if (auto tgetvalOp = dyn_cast<pto::TGetValOp>(op)) {
+      (void)tgetvalOp;
+      UpdateOpGenInfo(curOpInfo, llvm::to_vector(op->getOperands()));
+      OpKillHandle(curOpInfo, live, op->getBlock());
     } else if (auto storeOp = dyn_cast<memref::StoreOp>(op)) {
       UpdateStoreOpInfo(curOpInfo, storeOp.getMemRef(), live);
+    } else if (auto ptoDpsOp = dyn_cast<pto::PTO_DpsInitOpInterface>(op)) {
+      // PTO ops with destination (tile_buf, partition_view, etc.); no
+      // tensor/memref-only verification.
+      UpdateOpGenInfo(curOpInfo, llvm::to_vector(ptoDpsOp.getDpsInits()));
+      OpKillHandle(curOpInfo, live, op->getBlock());
     } else if (auto dstStyleOp = dyn_cast<DestinationStyleOpInterface>(op)) {
       // Process the operation of pto instructions as follows:
       // pto.hir.copy ins(%0 : memref<16xf16, #pto.address_space<gm>>)
@@ -1223,6 +1232,8 @@ MemPlan::GetBufferSpaceInfo(pto::AddressSpace &space) const {
     return std::make_pair(l0bAlignSize, l0bSpaceSize);
   case pto::AddressSpace::BIAS:
     return std::make_pair(biasAlignSize, biasSpaceSize);
+  case pto::AddressSpace::SCALING:
+    return std::make_pair(scalingAlignSize, scalingSpaceSize);
   }
   
   llvm_unreachable("Temporarily unsupported memory buffer space !");
@@ -1760,6 +1771,8 @@ LogicalResult MemPlan::InitMemSpecsFromModule(func::FuncOp funcOp) {
   l0bAlignSize = 4096;
   biasAlignSize = 256;
   biasSpaceSize = 524288;
+  scalingAlignSize = 256;
+  scalingSpaceSize = 1572864;
 
   auto moduleOp = getTopLevelModuleOp(funcOp);
   StringAttr strAttr = moduleOp->getAttrOfType<StringAttr>("pto.device-spec");
@@ -1796,6 +1809,8 @@ LogicalResult MemPlan::InitMemSpecsFromModule(func::FuncOp funcOp) {
     l0bAlignSize = 4096;
     biasAlignSize = 256;
     biasSpaceSize = 524288;
+    scalingAlignSize = 256;
+    scalingSpaceSize = 2097152;
     return success();
   }
 
@@ -1821,6 +1836,8 @@ LogicalResult MemPlan::InitMemSpecsFromModule(func::FuncOp funcOp) {
     l0bAlignSize = 4096;
     biasAlignSize = 256;
     biasSpaceSize = 524288;
+    scalingAlignSize = 256;
+    scalingSpaceSize = 2031616;
     return success();
   }
   

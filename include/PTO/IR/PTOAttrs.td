@@ -47,6 +47,7 @@ def PTO_AddressSpace_RIGHT : I32EnumAttrCase<"RIGHT", 4, "right">;
 def PTO_AddressSpace_ACC : I32EnumAttrCase<"ACC", 5, "acc">;
 def PTO_AddressSpace_VEC : I32EnumAttrCase<"VEC", 6, "vec">;
 def PTO_AddressSpace_BIAS : I32EnumAttrCase<"BIAS", 7, "bias">;
+def PTO_AddressSpace_SCALING : I32EnumAttrCase<"SCALING", 8, "scaling">;
 
 def PTO_AddressSpaceEnum : PTO_I32Enum<
   "AddressSpace", "PTO Address Space", [
@@ -57,7 +58,8 @@ def PTO_AddressSpaceEnum : PTO_I32Enum<
     PTO_AddressSpace_RIGHT,
     PTO_AddressSpace_ACC,
     PTO_AddressSpace_VEC,
-    PTO_AddressSpace_BIAS
+    PTO_AddressSpace_BIAS,
+    PTO_AddressSpace_SCALING
   ]>;
 
 def PTO_AddressSpaceAttr : PTO_Attr<"AddressSpace", "address_space"> {
@@ -146,11 +148,21 @@ def PTO_SyncOpTypeEnum : PTO_I32Enum<
     PTO_SYNC_TVECWAIT
   ]>;
 
-def PTO_SyncOpTypeAttr : PTO_Attr<"SyncOpType", "sync_op_type"> {
+// Canonical sync endpoint type attribute used by record_event/wait_event.
+def PTO_PipeEventTypeAttr : PTO_Attr<"PipeEventType", "pipe_event_type"> {
   let parameters = (ins EnumParameter<PTO_SyncOpTypeEnum>:$op_type);
   let assemblyFormat = "`<` params `>`";
   let description = [{
     High-level synchronization endpoint type. Lowering pass maps it to hardware pipes.
+  }];
+}
+
+// Legacy alias kept for compatibility with older code.
+def PTO_SyncOpTypeAttr : PTO_Attr<"SyncOpType", "sync_op_type"> {
+  let parameters = (ins EnumParameter<PTO_SyncOpTypeEnum>:$op_type);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Deprecated alias of pipe_event_type. Prefer #pto.pipe_event_type<...>.
   }];
 }
 
@@ -307,12 +319,12 @@ def PTO_VFAttr : PTO_Attr<"VectorFunction", "vector_function"> {
 
 def PTO_CmpModeEnum : PTO_I32Enum<
   "CmpMode", "PTO compare mode", [
-    I32EnumAttrCase<"EQ", 0, "equal">,
-    I32EnumAttrCase<"NE", 1, "not_equal">,
-    I32EnumAttrCase<"LT", 2, "less_than">,
-    I32EnumAttrCase<"LE", 3, "less_equal">,
-    I32EnumAttrCase<"GT", 4, "greater_than">,
-    I32EnumAttrCase<"GE", 5, "greater_equal">
+    I32EnumAttrCase<"EQ", 0, "eq">,
+    I32EnumAttrCase<"NE", 1, "ne">,
+    I32EnumAttrCase<"LT", 2, "lt">,
+    I32EnumAttrCase<"LE", 3, "le">,
+    I32EnumAttrCase<"GT", 4, "gt">,
+    I32EnumAttrCase<"GE", 5, "ge">
   ]>;
 
 def PTO_CmpModeAttr : EnumAttr<PTO_Dialect, PTO_CmpModeEnum, "cmp"> {
@@ -347,7 +359,8 @@ def PTO_MaskPatternEnum : PTO_I32Enum<
     I32EnumAttrCase<"P0011", 1>,
     I32EnumAttrCase<"P0110", 2>,
     I32EnumAttrCase<"P0001", 3>,
-    I32EnumAttrCase<"P1111", 4>
+    I32EnumAttrCase<"P1111", 4>,
+    I32EnumAttrCase<"P1010", 5>
   ]
 >;
 
