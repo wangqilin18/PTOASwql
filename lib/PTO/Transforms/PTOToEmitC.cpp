@@ -1969,7 +1969,7 @@ static KernelKind inferKernelKind(func::FuncOp f) {
   bool hasAdd = false;
   bool hasMM  = false;
   f.walk([&](Operation *op) {
-    if (isa<mlir::pto::TAddOp>(op)) hasAdd = true;
+    if (isa<mlir::pto::AddFDpsOp>(op)) hasAdd = true;
     if (isa<mlir::pto::TMatmulOp>(op)) hasMM = true;
     if (isa<mlir::pto::TMatmulAccOp>(op)) hasMM = true;
   });
@@ -2900,30 +2900,24 @@ struct PointerCastConversion : public OpConversionPattern<pto::PointerCastOp> {
       case TileRole::Scaling: roleTok = "TileType::Scaling"; break;
     }
 
-    // 4. Config & Layout (support BLayoutAttr/SLayoutAttr/PadValueAttr after namespace change)
+    // 4. Config & Layout
     std::string layoutParams = "BLayout::RowMajor";
     std::string extraParams = "";
     if (auto configOpt = op.getConfig()) {
         auto config = *configOpt;
         int32_t blVal = 0;
-        if (auto attr = dyn_cast<BLayoutAttr>(config.getBLayout()))
-            blVal = static_cast<int32_t>(attr.getValue());
- 
+        if (auto attr = dyn_cast<IntegerAttr>(config.getBLayout())) blVal = attr.getInt();
         if (blVal == 1) layoutParams = "BLayout::ColMajor";
 
         int32_t slVal = 0;
-        if (auto attr = dyn_cast<SLayoutAttr>(config.getSLayout()))
-            slVal = static_cast<int32_t>(attr.getValue());
-
+        if (auto attr = dyn_cast<IntegerAttr>(config.getSLayout())) slVal = attr.getInt();
         std::string slStr = (slVal == 1) ? "SLayout::RowMajor" : (slVal == 2) ? "SLayout::ColMajor" : "SLayout::NoneBox";
 
         int32_t frVal = 0;
         if (auto attr = dyn_cast<IntegerAttr>(config.getSFractalSize())) frVal = attr.getInt();
-
+        
         int32_t padVal = 0;
-        if (auto attr = dyn_cast<PadValueAttr>(config.getPad()))
-            padVal = static_cast<int32_t>(attr.getValue());
-
+        if (auto attr = dyn_cast<IntegerAttr>(config.getPad())) padVal = attr.getInt();
         std::string padStr = "PadValue::Null";
         switch (padVal) {
             case 1: padStr = "PadValue::Zero"; break;
@@ -3111,6 +3105,36 @@ struct PTOTStoreToTSTORE : public OpConversionPattern<pto::TStoreOp> {
         op.getLoc(), TypeRange{}, "TSTORE",
         ArrayAttr{}, ArrayAttr{},
         ValueRange{dstArg, src});
+
+    if (op->getNumResults() == 1) {
+      rewriter.replaceOp(op, dst);
+    } else {
+      rewriter.eraseOp(op);
+    }
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// pto.addf_dps lowering (TADD requires dst)
+//===----------------------------------------------------------------------===
+
+struct PTOAddfDpsToTADD : public OpConversionPattern<pto::AddFDpsOp> {
+  using OpConversionPattern<pto::AddFDpsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::AddFDpsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (!op.getDst())
+      return rewriter.notifyMatchFailure(op, "expected outs(dst) on pto.addf_dps");
+
+    Value lhs = peelUnrealized(adaptor.getLhs());
+    Value rhs = peelUnrealized(adaptor.getRhs());
+    Value dst = peelUnrealized(adaptor.getDst());
+
+    rewriter.create<emitc::CallOpaqueOp>(
+        op.getLoc(), TypeRange{}, "TADD",
+        ArrayAttr{}, ArrayAttr{},
+        ValueRange{dst, lhs, rhs});
 
     if (op->getNumResults() == 1) {
       rewriter.replaceOp(op, dst);
@@ -3561,7 +3585,10 @@ struct PTOWaitFlagToEmitC : public OpConversionPattern<mlir::pto::WaitFlagOp> {
 };
 
 struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
-  using OpConversionPattern<mlir::pto::SyncSetOp>::OpConversionPattern;
+  PTOSyncSetToEmitC(TypeConverter &typeConverter, MLIRContext *ctx,
+                    PTOArch targetArch)
+      : OpConversionPattern<mlir::pto::SyncSetOp>(typeConverter, ctx),
+        targetArch(targetArch) {}
 
   LogicalResult
   matchAndRewrite(mlir::pto::SyncSetOp op, OpAdaptor adaptor,
@@ -3573,7 +3600,10 @@ struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
     std::string pipeTok = pipeTokFromPipeAttr(op.getPipe());
     auto argsAttr = rewriter.getArrayAttr(
         {emitc::OpaqueAttr::get(ctx, pipeTok), op.getEventIdAttr()});
-    rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, "set_intra_block",
+    const char *kSyncSetCallee = (targetArch == PTOArch::A3)
+                                     ? "ffts_cross_core_sync"
+                                     : "set_intra_block";
+    rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, kSyncSetCallee,
                                          /*args=*/argsAttr,
                                          /*templateArgs=*/ArrayAttr{},
                                          /*operands=*/ValueRange{});
@@ -3581,10 +3611,15 @@ struct PTOSyncSetToEmitC : public OpConversionPattern<mlir::pto::SyncSetOp> {
     rewriter.eraseOp(op);
     return success();
   }
+
+  PTOArch targetArch;
 };
 
 struct PTOSyncWaitToEmitC : public OpConversionPattern<mlir::pto::SyncWaitOp> {
-  using OpConversionPattern<mlir::pto::SyncWaitOp>::OpConversionPattern;
+  PTOSyncWaitToEmitC(TypeConverter &typeConverter, MLIRContext *ctx,
+                     PTOArch targetArch)
+      : OpConversionPattern<mlir::pto::SyncWaitOp>(typeConverter, ctx),
+        targetArch(targetArch) {}
 
   LogicalResult
   matchAndRewrite(mlir::pto::SyncWaitOp op, OpAdaptor adaptor,
@@ -3596,12 +3631,16 @@ struct PTOSyncWaitToEmitC : public OpConversionPattern<mlir::pto::SyncWaitOp> {
     std::string pipeTok = pipeTokFromPipeAttr(op.getPipe());
     auto argsAttr = rewriter.getArrayAttr(
         {emitc::OpaqueAttr::get(ctx, pipeTok), op.getEventIdAttr()});
-    rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, "wait_intra_block",
+    const char *kSyncWaitCallee =
+        (targetArch == PTOArch::A3) ? "wait_flag_dev" : "wait_intra_block";
+    rewriter.create<emitc::CallOpaqueOp>(loc, TypeRange{}, kSyncWaitCallee,
                                          argsAttr, ArrayAttr{}, ValueRange{});
 
     rewriter.eraseOp(op);
     return success();
   }
+
+  PTOArch targetArch;
 };
 
 // GetBlockIdxOp Lowering (pto.get_block_idx -> get_block_idx())
@@ -6135,10 +6174,10 @@ struct PTOXORSToEmitC : public OpConversionPattern<pto::TXorSOp> {
     return success();
   }
 };
-  struct PTOPrintToTPRINT : public OpConversionPattern<pto::TPrintOp> {
-  using OpConversionPattern<pto::TPrintOp>::OpConversionPattern;
+  struct PTOPrintToTPRINT : public OpConversionPattern<pto::PrintOp_DPS> {
+  using OpConversionPattern<pto::PrintOp_DPS>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(pto::TPrintOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(pto::PrintOp_DPS op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
 
@@ -6786,7 +6825,8 @@ struct CFSwitchToCondBr : public OpRewritePattern<cf::SwitchOp> {
 static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
                                        TypeConverter &typeConverter,
                                        MLIRContext *ctx,
-                                       DataFlowSolver &solver) {
+                                       DataFlowSolver &solver,
+                                       PTOArch targetArch) {
   (void)solver;
   patterns.add<ArithCmpIToEmitC>(typeConverter, ctx);
   patterns.add<PTOBindTileToEmitC>(typeConverter, ctx);
@@ -6891,6 +6931,8 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<ArithMinSIToEmitC>(typeConverter, ctx);
   patterns.add<ArithMinUIToEmitC>(typeConverter, ctx);
   patterns.add<ArithNegFToEmitC>(typeConverter, ctx);
+  patterns.add<ArithSimpleBinaryToEmitC<arith::AddFOp, emitc::AddOp>>(typeConverter,
+                                                                     ctx);
   patterns.add<ArithSimpleBinaryToEmitC<arith::SubFOp, emitc::SubOp>>(typeConverter,
                                                                      ctx);
   patterns.add<ArithSimpleBinaryToEmitC<arith::MulFOp, emitc::MulOp>>(typeConverter,
@@ -6923,6 +6965,7 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOMScatterToMSCATTER>(typeConverter, ctx);
   patterns.add<PTOTAddCToTADDC>(typeConverter, ctx);
   patterns.add<PTOMinsToEmitC>(typeConverter, ctx);
+  patterns.add<PTOAddfDpsToTADD>(typeConverter, ctx);
   patterns.add<PTOMGatherToMGATHER>(typeConverter, ctx);
   patterns.add<PTOTMatmulToTMATMUL>(typeConverter, ctx);
   patterns.add<PTOTMatmulAccToTMATMULACC>(typeConverter, ctx);
@@ -6934,8 +6977,8 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOAddSCToTADDSC>(typeConverter, ctx);
   patterns.add<ArithCastOPToEmitC>(typeConverter, ctx);
   patterns.add<ArithTruncIToEmitC>(typeConverter, ctx);
-  patterns.add<PTOSyncSetToEmitC>(typeConverter, ctx);
-  patterns.add<PTOSyncWaitToEmitC>(typeConverter, ctx);
+  patterns.add<PTOSyncSetToEmitC>(typeConverter, ctx, targetArch);
+  patterns.add<PTOSyncWaitToEmitC>(typeConverter, ctx, targetArch);
   patterns.add<SectionToEmitC<pto::SectionCubeOp>>(typeConverter, ctx);
   patterns.add<SectionToEmitC<pto::SectionVectorOp>>(typeConverter, ctx);
   patterns.add<PTOGetBlockIdxToEmitC>(typeConverter, ctx);
@@ -6973,6 +7016,12 @@ namespace {
 struct EmitPTOManualPass
     : public PassWrapper<EmitPTOManualPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(EmitPTOManualPass)
+
+  PTOArch targetArch;
+
+  EmitPTOManualPass() : targetArch(PTOArch::A5) {}
+
+  explicit EmitPTOManualPass(PTOArch arch) : targetArch(arch) {}
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<emitc::EmitCDialect, func::FuncDialect, arith::ArithDialect,
@@ -7114,7 +7163,7 @@ struct EmitPTOManualPass
       return signalPassFailure();
 
     RewritePatternSet patterns(ctx);
-    populatePTOToEmitCPatterns(patterns, typeConverter, ctx, *solver);
+    populatePTOToEmitCPatterns(patterns, typeConverter, ctx, *solver, targetArch);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
 
     // 3. 执行转换
@@ -7268,9 +7317,13 @@ struct EmitPTOManualPass
 
     // =========================================================================
   }
-};
+  };
 } // namespace
 
 std::unique_ptr<Pass> mlir::pto::createEmitPTOManualPass() {
   return std::make_unique<EmitPTOManualPass>();
+}
+
+std::unique_ptr<Pass> mlir::pto::createEmitPTOManualPass(PTOArch arch) {
+  return std::make_unique<EmitPTOManualPass>(arch);
 }

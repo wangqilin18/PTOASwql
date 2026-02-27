@@ -30,13 +30,21 @@ namespace pto {
 #define GEN_PASS_DECL
 #include "PTO/Transforms/Passes.h.inc"
 
+enum class PTOArch {
+  A3,
+  A5,
+};
+
 std::unique_ptr<Pass> createPTOHighDimLoweringPass();
 std::unique_ptr<Pass> createPTOVFloopGatherPass();
 std::unique_ptr<Pass> createLoweringSyncToPipePass();
 
 // Creates a pass for ...
 std::unique_ptr<Pass> createPTOInsertSyncPass();
+// Default arch is A5 (override via createEmitPTOManualPass(PTOArch)).
 std::unique_ptr<Pass> createEmitPTOManualPass();
+// Explicitly select target arch for codegen.
+std::unique_ptr<Pass> createEmitPTOManualPass(PTOArch arch);
 
 
 /// Create a pass to convert ops from other dialects to PTO Ops.
@@ -54,7 +62,6 @@ std::unique_ptr<Pass> createPTOInsertCVMovPass();
 std::unique_ptr<Pass> createPTOConvertToDPSPass();
 std::unique_ptr<Pass> createPTORemoveRedundantBarrierPass();
 std::unique_ptr<Pass> createPTOViewToMemrefPass();
-std::unique_ptr<Pass> createEmitPTOManualPass();
 std::unique_ptr<mlir::Pass> createPTOInsertLoadStoreForMixCVPass();
 std::unique_ptr<Pass> createInferPTOLayoutPass();
 // Declare register function

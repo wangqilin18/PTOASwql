@@ -46,6 +46,13 @@ static mlir::pto::TileBufConfigAttr lookupConfig(Value v) {
   if (auto bind = v.getDefiningOp<mlir::pto::BindTileOp>()) {
     return bind.getConfig();
   }
+  // PointerCastOp can also carry tile metadata (used when alloc_tile specifies
+  // an explicit address).
+  if (auto pc = v.getDefiningOp<mlir::pto::PointerCastOp>()) {
+    if (auto cfg = pc.getConfig())
+      return *cfg;
+    return {};
+  }
   
   // 2. 穿透 View 操作 (SubView, Cast 等) 向上查找
   if (auto subview = v.getDefiningOp<memref::SubViewOp>()) {
@@ -69,6 +76,11 @@ static void lookupValidDims(Value v, Value &vRow, Value &vCol) {
   if (auto bind = v.getDefiningOp<mlir::pto::BindTileOp>()) {
     vRow = bind.getValidRow();
     vCol = bind.getValidCol();
+    return;
+  }
+  if (auto pc = v.getDefiningOp<mlir::pto::PointerCastOp>()) {
+    vRow = pc.getValidRow();
+    vCol = pc.getValidCol();
     return;
   }
   if (auto subview = v.getDefiningOp<memref::SubViewOp>()) {
@@ -477,21 +489,14 @@ struct PTOViewToMemrefPass
           }
         }
 
-        // 3. 构造 [Alloc 专用] 的静态类型 (Offset: 0)
-        // memref.alloc 要求明确的 layout，不能是动态 offset
-        auto allocLayout = StridedLayoutAttr::get(ctx, 0, strides); // offset = 0
-        auto allocType = MemRefType::get(shape, elemTy, allocLayout, tbTy.getMemorySpace());
-
-        // 4. 构造 [BindTile 输出] 的动态类型 (Offset: ?)
+        // 3. 构造 [BindTile 输出] 的动态类型 (Offset: ?)
         // 这必须与 convertPTOTypeToMemRef 返回的类型一致，以便与 Subview 兼容
-        auto targetLayout = StridedLayoutAttr::get(ctx, ShapedType::kDynamic, strides); // offset = ?
-        auto targetType = MemRefType::get(shape, elemTy, targetLayout, tbTy.getMemorySpace());
+        auto targetLayout =
+            StridedLayoutAttr::get(ctx, ShapedType::kDynamic, strides); // offset = ?
+        auto targetType =
+            MemRefType::get(shape, elemTy, targetLayout, tbTy.getMemorySpace());
 
-        // 5. 创建 AllocOp (使用静态类型)
-        // 这样就不会报 "symbol operand count" 错误了
-        Value alloc = rewriter.create<memref::AllocOp>(loc, allocType);
-
-        // 6. Preserve tile valid dims (v_row / v_col).
+        // 4. Preserve tile valid dims (v_row / v_col).
         //
         // `pto.alloc_tile` encodes the valid shape in the result TileBufType
         // (e.g. acc tile may be rows=16 but v_row=1). The alloc op itself does
@@ -522,20 +527,31 @@ struct PTOViewToMemrefPass
           }
         }
 
-        // 7. 获取 Config (保持不变)
+        // 5. 获取 Config (保持不变)
         auto configAttr = tbTy.getConfigAttr();
         if (!configAttr) configAttr = pto::TileBufConfigAttr::getDefault(ctx);
 
-        // 8. 创建 BindTileOp
+        // 6. If alloc_tile provides an explicit address, lower directly to
+        // pto.pointer_cast so downstream EmitC lowering can use the integral
+        // address without relying on MemPlan.
+        if (Value addr = op.getAddr()) {
+          auto pc = rewriter.create<pto::PointerCastOp>(
+              loc, targetType, ValueRange{addr}, vRow ? vRow : Value(),
+              vCol ? vCol : Value(), configAttr);
+          rewriter.replaceOp(op, pc.getResult());
+          continue;
+        }
+
+        // 7. Otherwise, allocate a concrete memref buffer and bind metadata.
+        // memref.alloc 要求明确的 layout，不能是动态 offset。
+        auto allocLayout = StridedLayoutAttr::get(ctx, 0, strides); // offset = 0
+        auto allocType = MemRefType::get(shape, elemTy, allocLayout, tbTy.getMemorySpace());
+        Value alloc = rewriter.create<memref::AllocOp>(loc, allocType);
+
         // BindTileOp 的 Builder 会自动处理空的 Value，将其视为静态维度
         auto bindOp = rewriter.create<pto::BindTileOp>(
-            loc, 
-            targetType,     
-            alloc,          
-            vRow ? vRow : Value(), // 显式传值
-            vCol ? vCol : Value(),
-            configAttr
-        );
+            loc, targetType, alloc, vRow ? vRow : Value(), vCol ? vCol : Value(),
+            configAttr);
 
         rewriter.replaceOp(op, bindOp.getResult());
       }
@@ -1068,24 +1084,34 @@ struct PTOViewToMemrefPass
           Value src0 = op->getOperand(0);
           auto config = lookupConfig(src0);
           
-          rewriter.replaceOpWithNewOp<pto::TAddOp>(
+          rewriter.replaceOpWithNewOp<pto::AddFDpsOp>(
               op, TypeRange{}, 
               op->getOperand(0), op->getOperand(1), op->getOperand(2));
       }
 
-      // --- TMatmulOp [Lhs, Rhs, Dst] (no optional bias in ODS) ---
+      // --- TMatmulOp [Lhs, Rhs, Bias?, Dst] ---
       SmallVector<mlir::pto::TMatmulOp , 8> matmuls;
       func.walk([&](mlir::pto::TMatmulOp  op) { matmuls.push_back(op); });
       for (auto op : matmuls) {
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
+        
         Value lhs = op->getOperand(0);
         Value rhs = op->getOperand(1);
-        Value dst = op->getOperand(2);
+        Value bias, dst;
+
+        if (op->getNumOperands() == 4) {
+            bias = op->getOperand(2);
+            dst  = op->getOperand(3);
+        } else {
+            bias = Value(); 
+            dst  = op->getOperand(2);
+        }
 
         auto config = lookupConfig(lhs);
 
-        rewriter.replaceOpWithNewOp<pto::TMatmulOp>(op, TypeRange{}, lhs, rhs, dst);
+        rewriter.replaceOpWithNewOp<pto::TMatmulOp>(
+          op, TypeRange{}, lhs, rhs, bias, dst);
       }
 
       // --- TMatmulAccOp [Acc, Lhs, Rhs, Dst] ---
@@ -2400,7 +2426,7 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        rewriter.replaceOpWithNewOp<pto::TPrintOp>(
+        rewriter.replaceOpWithNewOp<pto::PrintOp_DPS>(
             op,
             TypeRange{},
             src);

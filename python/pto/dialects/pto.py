@@ -81,6 +81,8 @@ __all__ = [
     "record_event", "wait_event", "barrier",
     # Scalar pointer helpers
     "load_scalar", "store_scalar"
+    # Tile allocation helpers
+    , "alloc_tile", "alloc_tile_level3"
 
     # Aliases for SyncOpType enums (for terse calls)
     ,"TLOAD","TSTORE_ACC","TSTORE_VEC","TMOV_M2L","TMOV_M2S",
@@ -171,6 +173,109 @@ def store_scalar(ptr, offset, value, *, loc=None, ip=None):
     return _ods_ir.Operation.create(
         "pto.store_scalar",
         operands=operands,
+        loc=loc,
+        ip=ip,
+    )
+
+# -----------------------------------------------------------------------------
+# Tile allocation helpers
+# -----------------------------------------------------------------------------
+def _ensure_i64_value(val, *, loc=None, ip=None):
+    if isinstance(val, int):
+        ctx = loc.context if loc else _ods_ir.Context.current
+        i64 = _ods_ir.IntegerType.get_signless(64, ctx)
+        attr = _ods_ir.IntegerAttr.get(i64, val)
+        op = _ods_ir.Operation.create(
+            "arith.constant",
+            results=[i64],
+            attributes={"value": attr},
+            loc=loc,
+            ip=ip,
+        )
+        return op.results[0]
+    return _pto_ops_gen._get_op_result_or_value(val)
+
+
+def _ensure_index_value(val, *, loc=None, ip=None):
+    if isinstance(val, int):
+        ctx = loc.context if loc else _ods_ir.Context.current
+        idx = _ods_ir.IndexType.get(ctx)
+        attr = _ods_ir.IntegerAttr.get(idx, val)
+        op = _ods_ir.Operation.create(
+            "arith.constant",
+            results=[idx],
+            attributes={"value": attr},
+            loc=loc,
+            ip=ip,
+        )
+        return op.results[0]
+    return _pto_ops_gen._get_op_result_or_value(val)
+
+def alloc_tile(result_type, *, addr=None, valid_row=None, valid_col=None, loc=None, ip=None):
+    """Create `pto.alloc_tile`.
+
+    This wrapper exists to make `addr` (and other optional operands) reliably
+    available from Python, even when ODS-generated bindings vary.
+
+    Args:
+      result_type: `pto.TileBufType`
+      addr: optional i64 SSA value or Python int
+      valid_row/valid_col: optional index SSA values or Python ints
+
+    Returns:
+      The resulting tile buffer SSA value.
+    """
+    operands = []
+    segment_sizes = []
+
+    if addr is None:
+        segment_sizes.append(0)
+    else:
+        operands.append(_ensure_i64_value(addr, loc=loc, ip=ip))
+        segment_sizes.append(1)
+
+    if valid_row is None:
+        segment_sizes.append(0)
+    else:
+        operands.append(_ensure_index_value(valid_row, loc=loc, ip=ip))
+        segment_sizes.append(1)
+
+    if valid_col is None:
+        segment_sizes.append(0)
+    else:
+        operands.append(_ensure_index_value(valid_col, loc=loc, ip=ip))
+        segment_sizes.append(1)
+
+    ctx = loc.context if loc else _ods_ir.Context.current
+    attrs = {
+        "operand_segment_sizes": _ods_ir.DenseI32ArrayAttr.get(segment_sizes, ctx),
+    }
+    op = _ods_ir.Operation.create(
+        "pto.alloc_tile",
+        results=[result_type],
+        operands=operands,
+        attributes=attrs,
+        loc=loc,
+        ip=ip,
+    )
+    return op.results[0]
+
+
+def alloc_tile_level3(result_type, addr, *, valid_row=None, valid_col=None, loc=None, ip=None):
+    """Create `pto.alloc_tile` for level3 lowering, requiring `addr`.
+
+    `addr` can be a MLIR SSA value (i64) or a Python int (auto materialized as
+    `arith.constant` i64). `valid_row`/`valid_col` can be SSA values (index) or
+    Python ints (auto materialized as `arith.constant` index).
+    """
+    if addr is None:
+        raise ValueError("addr is required for pto.alloc_tile in level3 mode")
+
+    return alloc_tile(
+        result_type,
+        addr=addr,
+        valid_row=valid_row,
+        valid_col=valid_col,
         loc=loc,
         ip=ip,
     )
