@@ -26,9 +26,14 @@ echo "Creating Python wheel..."
 echo "Copying PTO dialect files..."
 cp "${PTO_INSTALL_DIR}/mlir/dialects/"*.py "${PY_PACKAGE_DIR}/mlir/dialects/"
 
-# Copy setup.py to package directory
-echo "Copying setup.py..."
-cp "${PTO_SOURCE_DIR}/docker/setup.py" "${PY_PACKAGE_DIR}/"
+# Copy platform-specific setup.py to package directory.
+# On macOS, use setup_mac.py and rename it to setup.py in the build dir.
+SETUP_TEMPLATE="${PTO_SOURCE_DIR}/docker/setup.py"
+if [ "$(uname -s)" = "Darwin" ] && [ -f "${PTO_SOURCE_DIR}/docker/setup_mac.py" ]; then
+  SETUP_TEMPLATE="${PTO_SOURCE_DIR}/docker/setup_mac.py"
+fi
+echo "Copying $(basename "${SETUP_TEMPLATE}") as setup.py..."
+cp "${SETUP_TEMPLATE}" "${PY_PACKAGE_DIR}/setup.py"
 
 # Determine Python version tag (e.g., cp311, cp312)
 PY_VERSION=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
