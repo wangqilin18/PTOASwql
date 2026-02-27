@@ -131,17 +131,7 @@ jobs:
           fi
           # setup-python may provide a universal2 interpreter on macOS.
           # Force a single-arch wheel tag to match the matrix target and delocate checks.
-          export WHEEL_PLAT_NAME=$(TARGET_ARCH="${TARGET_ARCH}" python - <<'PY'
-import os
-import sysconfig
-
-plat = sysconfig.get_platform().replace("-", "_").replace(".", "_")
-target = os.environ["TARGET_ARCH"]
-if plat.endswith("universal2"):
-    plat = plat[: -len("universal2")] + target
-print(plat)
-PY
-          )
+          export WHEEL_PLAT_NAME=$(python "$PTO_SOURCE_DIR/docker/get_macos_wheel_plat_name.py" "$TARGET_ARCH")
           bash $PTO_SOURCE_DIR/docker/create_wheel.sh
           shopt -s nullglob
           built_wheels=("$PY_PACKAGE_DIR"/dist/ptoas*.whl)
