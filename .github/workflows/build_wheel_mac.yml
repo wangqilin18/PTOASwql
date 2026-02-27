@@ -123,7 +123,31 @@ jobs:
 
       - name: Create Python wheel
         run: |
+          export PY_PACKAGE_DIR=$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            TARGET_ARCH="x86_64"
+          else
+            TARGET_ARCH="arm64"
+          fi
+          # setup-python may provide a universal2 interpreter on macOS.
+          # Force a single-arch wheel tag to match the matrix target and delocate checks.
+          export WHEEL_PLAT_NAME=$(TARGET_ARCH="${TARGET_ARCH}" python - <<'PY'
+import os
+import sysconfig
+
+plat = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+target = os.environ["TARGET_ARCH"]
+if plat.endswith("universal2"):
+    plat = plat[: -len("universal2")] + target
+print(plat)
+PY
+          )
           bash $PTO_SOURCE_DIR/docker/create_wheel.sh
+          shopt -s nullglob
+          built_wheels=("$PY_PACKAGE_DIR"/dist/ptoas*.whl)
+          if [ "${#built_wheels[@]}" -gt 0 ]; then
+            printf 'Built wheel file: %s\n' "$(basename "${built_wheels[0]}")"
+          fi
 
       - name: Repair wheel with delocate
         run: |
@@ -134,10 +158,17 @@ jobs:
           else
             REQUIRED_ARCH="arm64"
           fi
+          shopt -s nullglob
+          wheels=(dist/ptoas*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one wheel in dist/, found ${#wheels[@]}:"
+            printf '  %s\n' "${wheels[@]}"
+            exit 1
+          fi
           delocate-wheel \
             --require-archs "${REQUIRED_ARCH}" \
             --wheel-dir wheelhouse \
-            dist/ptoas*.whl
+            "${wheels[0]}"
 
       - name: Test wheel installation
         run: |

@@ -7,6 +7,9 @@
 #   PTO_SOURCE_DIR  - Path to PTO source directory
 #   PTO_INSTALL_DIR - Path to PTO install directory
 #   LLVM_BUILD_DIR  - Path to LLVM build directory (for python packages location)
+#
+# Optional environment variables:
+#   WHEEL_PLAT_NAME - Explicit wheel platform tag (for bdist_wheel --plat-name)
 
 set -e
 
@@ -42,7 +45,12 @@ echo "Python version tag: ${PY_VERSION}"
 # Build the wheel with version-specific tag
 echo "Building wheel..."
 cd "${PY_PACKAGE_DIR}"
-python setup.py bdist_wheel --python-tag "${PY_VERSION}"
+if [ -n "${WHEEL_PLAT_NAME:-}" ]; then
+  echo "Using wheel platform tag: ${WHEEL_PLAT_NAME}"
+  python setup.py bdist_wheel --python-tag "${PY_VERSION}" --plat-name "${WHEEL_PLAT_NAME}"
+else
+  python setup.py bdist_wheel --python-tag "${PY_VERSION}"
+fi
 
 echo "Wheel created at ${PY_PACKAGE_DIR}/dist/"
 ls -la "${PY_PACKAGE_DIR}/dist/"*.whl
