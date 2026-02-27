@@ -34,9 +34,15 @@ std::unique_ptr<Pass> createPTOHighDimLoweringPass();
 std::unique_ptr<Pass> createPTOVFloopGatherPass();
 std::unique_ptr<Pass> createLoweringSyncToPipePass();
 
+enum class PTOArch {
+  A3,
+  A5,
+};
+
 // Creates a pass for ...
 std::unique_ptr<Pass> createPTOInsertSyncPass();
 std::unique_ptr<Pass> createEmitPTOManualPass();
+std::unique_ptr<Pass> createEmitPTOManualPass(PTOArch arch);
 
 
 /// Create a pass to convert ops from other dialects to PTO Ops.
@@ -54,7 +60,6 @@ std::unique_ptr<Pass> createPTOInsertCVMovPass();
 std::unique_ptr<Pass> createPTOConvertToDPSPass();
 std::unique_ptr<Pass> createPTORemoveRedundantBarrierPass();
 std::unique_ptr<Pass> createPTOViewToMemrefPass();
-std::unique_ptr<Pass> createEmitPTOManualPass();
 std::unique_ptr<mlir::Pass> createPTOInsertLoadStoreForMixCVPass();
 std::unique_ptr<Pass> createInferPTOLayoutPass();
 // Declare register function
