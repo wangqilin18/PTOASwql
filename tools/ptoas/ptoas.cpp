@@ -615,7 +615,7 @@ int main(int argc, char **argv) {
 
   if (effectiveLevel != PTOBuildLevel::Level3) {
     PlanMemoryOptions planMemoryOption;
-    planMemoryOption.memMode = MemPlanMode::GLOBAL_WORKSPACE_PLAN;
+    planMemoryOption.memMode = MemPlanMode::LOCAL_MEM_PLAN;
     planMemoryOption.enableGlobalReuse = false;
     planMemoryOption.enablePrintMemoryAllocatedSize = false;
     pm.addPass(pto::createPlanMemoryPass(planMemoryOption));
