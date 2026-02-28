@@ -107,7 +107,7 @@ static llvm::cl::opt<bool> emitAddPtrTrace(
 
 static llvm::cl::opt<std::string> ptoTargetArch(
     "pto-arch",
-    llvm::cl::desc("Target Ascend architecture for codegen: a3 or a5 (default: build-time setting)"),
+    llvm::cl::desc("Target Ascend architecture for codegen: a3 or a5 (default: a3)"),
     llvm::cl::value_desc("a3|a5"),
     llvm::cl::init(""));
 
@@ -648,7 +648,7 @@ int main(int argc, char **argv) {
 
   pm.addPass(createCSEPass());
   if (ptoTargetArch.empty()) {
-    pm.addPass(pto::createEmitPTOManualPass());
+    pm.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A3));
   } else {
     std::string arch = ptoTargetArch;
     for (char &c : arch)
