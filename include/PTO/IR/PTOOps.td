@@ -45,6 +45,9 @@ def ScalarPtrOrMemRef :
     CPred<"::mlir::pto::isScalarPtrOrMemRef($_self)">,
     "Ptr or MemRef in GM">;
 
+def PrintScalarType :
+  AnyTypeOf<[Index, AnySignlessInteger, AnyFloat], "numeric (index/integer/float)">;
+
 //===----------------------------------------------------------------------===//
 // Op Class
 //===----------------------------------------------------------------------===//
@@ -179,6 +182,35 @@ def PartitionViewOp : PTO_Op<"partition_view", [AttrSizedOperandSegments]> {
   let assemblyFormat = [{
     $source `,` `offsets` `=` `[` $offsets `]` `,` `sizes` `=` `[` $sizes `]`
     attr-dict `:` qualified(type($source)) `->` qualified(type($result))
+  }];
+}
+
+// Helper: tensor_view or memref (after lowering tensor_view to memref).
+def TensorViewOrMemRef :
+  AnyTypeOf<[TensorViewType, AnyMemRef], "TensorView or MemRef">;
+
+// Get the size of a dimension of a tensor_view or its lowered memref view.
+// Result type: Index (use arith.index_cast if i32 is needed).
+def GetTensorViewDimOp : PTO_Op<"get_tensor_view_dim", [Pure]> {
+  let summary = "Get the size of a dimension of a tensor_view.";
+  let description = [{
+    Returns the size of the given dimension of a logical tensor view.
+    This op accepts either !pto.tensor_view or the memref it is lowered to.
+    IR (tensor_view form):
+      %dim_size = pto.get_tensor_view_dim %tv, %dim_index
+        : !pto.tensor_view, index -> index
+    IR (memref form, after lowering):
+      %dim_size = pto.get_tensor_view_dim %mr, %dim_index
+        : memref<...>, index -> index
+  }];
+  let arguments = (ins
+    TensorViewOrMemRef:$tensor_view,
+    Index:$dim_index
+  );
+  let results = (outs Index:$result);
+  let assemblyFormat = [{
+    $tensor_view `,` $dim_index `:` qualified(type($tensor_view)) `->` qualified(type($result))
+    attr-dict
   }];
 }
 
@@ -1197,6 +1229,33 @@ def SetFFTsOp : PTO_Op<"set_ffts", [MemoryEffects<[MemRead, MemWrite]>]> {
 
   let hasVerifier = 1;
 }
+
+
+def PrintOp : PTO_Op<"print", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Print debug: format string (attribute) and scalar value.";
+  let description = [{
+    Debug print op. First argument is the format string (string attribute), second is a scalar value.
+    Format in IR: `pto.print ins("format", %scalar : type(%scalar))`
+  }];
+  let arguments = (ins StrAttr:$format, PrintScalarType:$scalar);
+  let results = (outs);
+  let assemblyFormat = [{
+    `ins` `(` $format `,` $scalar `:` type($scalar) `)`
+    attr-dict
+  }];
+}
+
+def TrapOp : PTO_Op<"trap"> {
+  let summary = "Trap: abort execution (no operands).";
+  let description = [{
+    Inserts a trap to stop execution. No arguments, no results.
+    Format in IR: pto.trap
+  }];
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = "attr-dict";
+}
+
 // ---- tile-world TOp version (with 't') ----
 // pto.tmgather ins(%mem, %idx) outs(%dst) [ ...] -> tensor?
 def MGatherOp : PTO_TOp<"mgather", [
